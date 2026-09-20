@@ -57,8 +57,12 @@ final class AppState: ObservableObject {
         }
     }
 
-    let store = DocumentStore()
+    let store: DocumentStore
     weak var editor: EditorCoordinating?
+
+    init(store: DocumentStore = DocumentStore()) {
+        self.store = store
+    }
 
     var matchCounterText: String {
         matches.isEmpty ? "0/0" : "\(currentMatchIndex + 1)/\(matches.count)"

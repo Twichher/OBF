@@ -3,15 +3,21 @@ import SwiftUI
 
 extension NSAttributedString.Key {
     static let obfHeadingLevel = NSAttributedString.Key("OBFHeadingLevel")
+    /// 1 = task (todo), 2 = done. Set on paragraph content only, like
+    /// obfHeadingLevel; the trailing newline never carries it.
+    static let obfTaskState = NSAttributedString.Key("OBFTaskState")
 }
 
 enum OBFCommand {
     case find
     case heading(Int)
+    case task
+    case taskDone
 }
 
 final class OBFTextView: NSTextView {
     var onInsertNewline: (() -> Bool)?
+    var onDeleteBackward: (() -> Bool)?
     var onCommand: ((OBFCommand) -> Void)?
 
     override func insertNewline(_ sender: Any?) {
@@ -19,6 +25,13 @@ final class OBFTextView: NSTextView {
             return
         }
         super.insertNewline(sender)
+    }
+
+    override func deleteBackward(_ sender: Any?) {
+        if let onDeleteBackward, onDeleteBackward() {
+            return
+        }
+        super.deleteBackward(sender)
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
@@ -29,6 +42,8 @@ final class OBFTextView: NSTextView {
             case "1": onCommand?(.heading(1)); return true
             case "2": onCommand?(.heading(2)); return true
             case "0": onCommand?(.heading(0)); return true
+            case "3": onCommand?(.task); return true
+            case "4": onCommand?(.taskDone); return true
             default: break
             }
         }
@@ -63,6 +78,8 @@ final class OBFTextView: NSTextView {
 
 protocol EditorCoordinating: AnyObject {
     func setHeadingLevel(_ level: Int)
+    func toggleTask()
+    func toggleTaskDone()
     func scrollToOutline(_ item: OutlineItem)
     func updateFindMatches()
     func findNext()

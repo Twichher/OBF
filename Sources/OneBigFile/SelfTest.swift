@@ -32,12 +32,32 @@ enum SelfTest {
         print("== H: find clears selection; highlight survives edits/zoom; close clears all ==")
         if !scenarioH() { failures += 1 }
 
+        print("== I: two-finger swipe recognizer (left=next, right=prev, once per gesture) ==")
+        if !scenarioI() { failures += 1 }
+
+        print("== J: Cmd+3 creates a task, typing follows, Enter ends it, markdown round-trip ==")
+        if !scenarioJ() { failures += 1 }
+
+        print("== K: Cmd+4 toggles done (dimmed text, - [x]) ==")
+        if !scenarioK() { failures += 1 }
+
+        print("== L: Backspace right after the checkbox un-tasks the line, keeps text ==")
+        if !scenarioL() { failures += 1 }
+
+        print("== M: markdown parse/serialize round-trip with tasks ==")
+        if !scenarioM() { failures += 1 }
+
+        print("== N: task text wraps with hanging indent aligned after the checkbox ==")
+        if !scenarioN() { failures += 1 }
+
         print(failures == 0 ? "SELFTEST OK" : "SELFTEST FAILED (\(failures))")
         return failures == 0 ? 0 : 1
     }
 
     private static func makeStack() -> (AppState, OBFTextView, Coordinator, NSTextStorage) {
-        let appState = AppState()
+        // Tests write to a temp file: the debounced auto-save must never
+        // touch the real document.
+        let appState = AppState(store: DocumentStore(fileURL: URL(fileURLWithPath: "/tmp/obf_selftest_document.md")))
         let storage = NSTextStorage()
         let layoutManager = NSLayoutManager()
         let container = NSTextContainer(size: NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
@@ -85,6 +105,10 @@ enum SelfTest {
             let last = ns.character(at: NSMaxRange(enclosing) - 1)
             let contentLength = (last == 0x0A || last == 0x0D) ? enclosing.length - 1 : enclosing.length
             guard contentLength > 0 else { levels.append("empty"); return }
+            if let task = storage.attribute(.obfTaskState, at: enclosing.location, effectiveRange: nil) as? Int {
+                levels.append(task == 2 ? "done" : "task")
+                return
+            }
             levels.append(storage.attribute(.obfHeadingLevel, at: enclosing.location, effectiveRange: nil) as? Int == 1 ? "H1"
                         : storage.attribute(.obfHeadingLevel, at: enclosing.location, effectiveRange: nil) as? Int == 2 ? "H2"
                         : "body")
@@ -330,8 +354,12 @@ enum SelfTest {
         let highlightedAfterEdit = hasBackgroundAttribute(storage)
 
         // Zoom restyles the whole document without any character edit.
+        // bodyPointSize persists to UserDefaults, so restore it afterwards —
+        // otherwise every test run would leak a zoom step.
+        let savedPointSize = appState.bodyPointSize
         coordinator.zoomIn()
         let highlightedAfterZoom = hasBackgroundAttribute(storage)
+        appState.bodyPointSize = savedPointSize
 
         // Closing find removes the highlight and any selection.
         textView.setSelectedRange(NSRange(location: 2, length: 3))
@@ -397,53 +425,257 @@ enum SelfTest {
                   let content = window.contentView else { exit(1) }
             snap(window, "1_initial")
 
-            // Simulate hovering the sidebar tab title: warp the cursor onto
-            // it and post a mouse-moved so SwiftUI's onHover fires. The
-            // point comes from the fixed layout: content is 1200x800 with
-            // 16 pt padding; the 260 pt sidebar sits on the right, its tab
-            // title centered at the bottom bar.
-            let hoverPoint = NSPoint(x: 924 + 130, y: 40)
-            let restore = CGEvent(source: nil)?.location
-            let screenRect = window.convertToScreen(CGRect(origin: hoverPoint, size: .zero))
-            let mainHeight = NSScreen.screens.first?.frame.height ?? 0
-            CGWarpMouseCursorPosition(CGPoint(x: screenRect.origin.x, y: mainHeight - screenRect.origin.y))
-            if let moved = NSEvent.mouseEvent(
-                with: .mouseMoved,
-                location: hoverPoint,
-                modifierFlags: [],
-                timestamp: ProcessInfo.processInfo.systemUptime,
-                windowNumber: window.windowNumber,
-                context: nil,
-                eventNumber: 0,
-                clickCount: 0,
-                pressure: 0
-            ) {
-                NSApplication.shared.postEvent(moved, atStart: false)
-                // Tracking areas refresh on layout; a second nudge after a
-                // beat makes sure the hover state sticks.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                    NSApplication.shared.postEvent(moved, atStart: false)
+            /// Posts a synthetic trackpad-style scroll event (with gesture
+            /// phase) at a window point — lets the swipe pipeline be tested
+            /// end to end without real touch input. Phase values mirror
+            /// NSEvent.Phase raw values: 1 = began, 2 = changed, 4 = ended.
+            func postScroll(at point: NSPoint, phase: Int64, dx: Int32, dy: Int32) {
+                guard let source = CGEventSource(stateID: .hidSystemState),
+                      let cg = CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0) else { return }
+                cg.setIntegerValueField(.scrollWheelEventScrollPhase, value: phase)
+                let screenRect = window.convertToScreen(CGRect(origin: point, size: .zero))
+                let mainHeight = NSScreen.screens.first?.frame.height ?? 0
+                cg.location = CGPoint(x: screenRect.origin.x, y: mainHeight - screenRect.origin.y)
+                if let nsEvent = NSEvent(cgEvent: cg) {
+                    NSApplication.shared.postEvent(nsEvent, atStart: false)
                 }
             }
+            func swipe(at point: NSPoint, dx: Int32, dy: Int32, steps: Int) {
+                postScroll(at: point, phase: 1, dx: 0, dy: 0)
+                for _ in 0..<steps {
+                    postScroll(at: point, phase: 2, dx: dx, dy: dy)
+                }
+                postScroll(at: point, phase: 4, dx: 0, dy: 0)
+            }
 
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-                snap(window, "2_hover_tablist")
-                appState.sidebarTab = .tasks
+            let sidebarPoint = NSPoint(x: 924 + 130, y: 400)
+            let editorPoint = NSPoint(x: 400, y: 400)
+            SelfTest.loggingScrollEvents = true
+            appState.sidebarTab = .structure
+            swipe(at: sidebarPoint, dx: -15, dy: 0, steps: 6)
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                // Assert direction relative to the deltas the monitor
+                // actually saw, so CG→NS sign mapping cannot skew the test.
+                let sawNegativeX = SelfTest.debugScrollLog.contains { $0.contains("dx=-") }
+                let expected: SidebarTab = sawNegativeX ? .tasks : .structure
+                let leftOK = appState.sidebarTab == expected
+                print("OPEN-MEASURE swipe-over-sidebar: tab=\(appState.sidebarTab.title) expected=\(expected.title) ok=\(leftOK)")
+                print("OPEN-MEASURE scroll-log: \(SelfTest.debugScrollLog)")
+                SelfTest.debugScrollLog = []
+                // Vertical gesture and horizontal gesture over the editor
+                // must NOT switch tabs.
+                swipe(at: sidebarPoint, dx: 0, dy: -15, steps: 6)
+                swipe(at: editorPoint, dx: -15, dy: 0, steps: 6)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                    snap(window, "3_empty_tab")
-                    if let restore {
-                        CGWarpMouseCursorPosition(restore)
+                    let ignoredOK = appState.sidebarTab == .tasks
+                    print("OPEN-MEASURE vertical+editor swipes ignored: tab=\(appState.sidebarTab.title) ok=\(ignoredOK)")
+                    SelfTest.loggingScrollEvents = false
+
+                    // Simulate hovering the sidebar tab title: warp the
+                    // cursor onto it and post mouse-moved events so
+                    // SwiftUI's onHover fires. The point comes from the
+                    // fixed layout (see OBFTheme): the sidebar's tab title
+                    // is centered in the bottom bar.
+                    let hoverPoint = NSPoint(x: 924 + 130, y: 40)
+                    let restore = CGEvent(source: nil)?.location
+                    let screenRect = window.convertToScreen(CGRect(origin: hoverPoint, size: .zero))
+                    let mainHeight = NSScreen.screens.first?.frame.height ?? 0
+                    CGWarpMouseCursorPosition(CGPoint(x: screenRect.origin.x, y: mainHeight - screenRect.origin.y))
+                    if let moved = NSEvent.mouseEvent(
+                        with: .mouseMoved,
+                        location: hoverPoint,
+                        modifierFlags: [],
+                        timestamp: ProcessInfo.processInfo.systemUptime,
+                        windowNumber: window.windowNumber,
+                        context: nil,
+                        eventNumber: 0,
+                        clickCount: 0,
+                        pressure: 0
+                    ) {
+                        NSApplication.shared.postEvent(moved, atStart: false)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                            NSApplication.shared.postEvent(moved, atStart: false)
+                        }
                     }
-                    sv.contentView.scroll(to: NSPoint(x: 0, y: 120))
-                    sv.reflectScrolledClipView(sv.contentView)
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                        measure("after-scroll")
-                        _ = content
-                        exit(0)
+
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                        snap(window, "2_hover_tablist")
+                        appState.sidebarTab = .tasks
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                            snap(window, "3_empty_tab")
+                            if let restore {
+                                CGWarpMouseCursorPosition(restore)
+                            }
+                            // Visual check of task rendering: swap in a demo
+                            // document, snap, then restore the original
+                            // before the debounced save can fire.
+                            guard let storage = textView.textStorage else { exit(1) }
+                            let original = storage.string
+                            storage.setAttributedString(coordinator.render(markdown: """
+                                Обычный текст перед заданием
+                                - [ ] Купить молоко и хлеб
+                                - [x] Сдать лабораторную работу
+                                - [ ] Очень длинное задание, которое точно не влезет в одну строку редактора и должно перенестись на следующую строку с отступом
+                                Обычный текст после задания
+                                """))
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                                snap(window, "4_tasks")
+                                storage.setAttributedString(coordinator.render(markdown: original))
+                                sv.contentView.scroll(to: NSPoint(x: 0, y: 120))
+                                sv.reflectScrolledClipView(sv.contentView)
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                                    measure("after-scroll")
+                                    _ = content
+                                    exit(0)
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
+    }
+
+    /// Two-finger horizontal swipes switch sidebar tabs: fingers left →
+    /// next, right → prev, at most one switch per gesture; mostly-vertical
+    /// scrolling and short drags never trigger.
+    private static func scenarioI() -> Bool {
+        var recognizer = HorizontalSwipeRecognizer()
+
+        func gesture(_ dx: CGFloat, _ dy: CGFloat, steps: Int) -> [SidebarTabMove] {
+            var moves: [SidebarTabMove] = []
+            if let move = recognizer.handle(phase: .began, deltaX: 0, deltaY: 0) { moves.append(move) }
+            for _ in 0..<steps {
+                if let move = recognizer.handle(phase: .changed, deltaX: dx, deltaY: dy) { moves.append(move) }
+            }
+            if let move = recognizer.handle(phase: .ended, deltaX: 0, deltaY: 0) { moves.append(move) }
+            return moves
+        }
+
+        let left = gesture(-12, 2, steps: 8)       // -96 horizontal: next
+        let right = gesture(12, -2, steps: 8)      // +96 horizontal: prev
+        let vertical = gesture(2, -12, steps: 8)   // vertical-dominant: none
+        let short = gesture(-5, 0, steps: 5)       // -25 < threshold: none
+
+        print("    left=\(left) right=\(right) vertical=\(vertical) short=\(short)")
+        let ok = left == [.next] && right == [.prev] && vertical.isEmpty && short.isEmpty
+        print("    -> OK: \(ok)")
+        return ok
+    }
+
+    /// Cmd+3 on an empty line inserts the checkbox immediately; typing goes
+    /// after it; Enter ends the task and continues in plain body text.
+    /// Serialization stores the paragraph as a markdown task.
+    private static func scenarioJ() -> Bool {
+        let (_, textView, coordinator, storage) = makeStack()
+
+        coordinator.toggleTask()
+        let checkboxThere = storage.string == "\u{FFFC}"
+            && storage.attribute(.obfTaskState, at: 0, effectiveRange: nil) as? Int == 1
+            && storage.attribute(.attachment, at: 0, effectiveRange: nil) != nil
+
+        type(textView, "текст задания")
+        textView.insertNewline(nil)
+        type(textView, "обычный текст")
+        pump()
+
+        let markers = paragraphMarkers(storage)
+        let serialized = coordinator.serialize(storage: storage)
+        let expected = "- [ ] текст задания\nобычный текст"
+        print("    checkbox=\(checkboxThere) markers=\(markers) serialized=\(serialized.debugDescription)")
+        let ok = checkboxThere && markers == ["task", "body"] && serialized == expected
+        print("    -> OK: \(ok)")
+        return ok
+    }
+
+    /// Cmd+4 marks the task under the caret done (checkmark, dimmed text,
+    /// "- [x]" on save) and toggles back on a second press.
+    private static func scenarioK() -> Bool {
+        let (_, textView, coordinator, storage) = makeStack()
+
+        type(textView, "сделать дело")
+        coordinator.toggleTask()
+        coordinator.toggleTaskDone()
+        pump()
+
+        let markedDone = storage.attribute(.obfTaskState, at: 0, effectiveRange: nil) as? Int == 2
+        let color = storage.attribute(.foregroundColor, at: 1, effectiveRange: nil) as? NSColor
+        let dimmed = color != nil && color!.alphaComponent < 0.6
+        let serialized = coordinator.serialize(storage: storage)
+
+        coordinator.toggleTaskDone()
+        pump()
+        let backToTodo = storage.attribute(.obfTaskState, at: 0, effectiveRange: nil) as? Int == 1
+
+        print("    done=\(markedDone) dimmed=\(dimmed) serialized=\(serialized.debugDescription) backToTodo=\(backToTodo)")
+        let ok = markedDone && dimmed && serialized == "- [x] сделать дело" && backToTodo
+        print("    -> OK: \(ok)")
+        return ok
+    }
+
+    /// Backspace with the caret immediately after the checkbox removes the
+    /// task formatting but keeps the text.
+    private static func scenarioL() -> Bool {
+        let (_, textView, coordinator, storage) = makeStack()
+
+        type(textView, "текст задания")
+        coordinator.toggleTask()
+        textView.setSelectedRange(NSRange(location: 1, length: 0))
+        textView.deleteBackward(nil)
+        pump()
+
+        let untasked = storage.attribute(.obfTaskState, at: 0, effectiveRange: nil) == nil
+        let textKept = storage.string == "текст задания"
+        print("    untasked=\(untasked) text=\(storage.string.debugDescription)")
+        let ok = untasked && textKept
+        print("    -> OK: \(ok)")
+        return ok
+    }
+
+    /// Markdown round-trip: headings, tasks (todo and done), plain bullets
+    /// and body text parse and serialize back to the identical string.
+    private static func scenarioM() -> Bool {
+        let (_, _, coordinator, storage) = makeStack()
+
+        let markdown = "# Заголовок\n- [ ] сделать раз\n- [x] сделано два\n- просто пункт\nобычный текст"
+        storage.setAttributedString(coordinator.render(markdown: markdown))
+        let serialized = coordinator.serialize(storage: storage)
+        print("    roundtrip=\(serialized == markdown)")
+        if serialized != markdown {
+            print("    got: \(serialized.debugDescription)")
+        }
+        let ok = serialized == markdown
+        print("    -> OK: \(ok)")
+        return ok
+    }
+
+    /// A task's wrapped lines align with the text after the checkbox (the
+    /// hanging indent equals the checkbox width including its gap).
+    private static func scenarioN() -> Bool {
+        let (appState, textView, coordinator, _) = makeStack()
+        guard let layoutManager = textView.layoutManager,
+              let container = textView.textContainer else { return false }
+
+        coordinator.toggleTask()
+        let longLine = (0..<60).map { _ in "слово" }.joined(separator: " ")
+        type(textView, longLine)
+        textView.setFrameSize(NSSize(width: 892, height: 400))
+        layoutManager.ensureLayout(for: container)
+
+        var lineStarts: [CGFloat] = []
+        layoutManager.enumerateLineFragments(forGlyphRange: NSRange(location: 0, length: layoutManager.numberOfGlyphs)) { rect, _, _, glyphRange, _ in
+            let location = layoutManager.location(forGlyphAt: glyphRange.location)
+            lineStarts.append(rect.minX + location.x)
+        }
+        let indent = ceil(appState.bodyFont.pointSize * 0.85) + 6
+        let padding = container.lineFragmentPadding
+        print("    lineStarts=\(lineStarts) indent=\(indent) padding=\(padding)")
+        let ok = lineStarts.count > 1
+            && abs(lineStarts[0] - padding) < 0.5
+            && lineStarts.dropFirst().allSatisfy { abs($0 - padding - indent) < 0.5 }
+        print("    -> OK: \(ok)")
+        return ok
     }
 
     /// Drives the REAL app window (SwiftUI stack included) through the
@@ -702,6 +934,11 @@ extension NSApplication {
 extension SelfTest {
     /// Set by the swizzled reportException: during --uitest.
     static var uiExceptionSeen = false
+
+    /// When true, the sidebar scroll monitor logs every scrollWheel event
+    /// it sees — lets --uitest-open verify the gesture pipeline.
+    static var loggingScrollEvents = false
+    static var debugScrollLog: [String] = []
 
     /// Ghost-line repro: after deleting an H1, deleting the blank lines
     /// above a word leaves the word's old line on screen (drawn twice).

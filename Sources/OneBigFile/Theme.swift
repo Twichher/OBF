@@ -24,6 +24,14 @@ enum OBFTheme {
     static let maxBodySize: Double = 28
     static let defaultBodySize: Double = 14
 
+    /// Fixed window layout. The window is not resizable (.contentSize), so
+    /// these constants drive both the SwiftUI frames and the sidebar hit
+    /// region the swipe monitor checks gesture locations against.
+    static let windowWidth: CGFloat = 1200
+    static let windowHeight: CGFloat = 800
+    static let sidebarWidth: CGFloat = 260
+    static let contentPadding: CGFloat = 16
+
     /// Single place to change the app font. Applies to the editor, the
     /// sidebar and the find bar.
     static let fontName = "Georgia"

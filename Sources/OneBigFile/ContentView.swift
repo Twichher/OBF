@@ -19,11 +19,11 @@ struct ContentView: View {
                 .frame(width: 1)
 
             SidebarView()
-                .frame(width: 260)
+                .frame(width: OBFTheme.sidebarWidth)
                 .frame(maxHeight: .infinity)
         }
-        .padding(16)
-        .frame(width: 1200, height: 800)
+        .padding(OBFTheme.contentPadding)
+        .frame(width: OBFTheme.windowWidth, height: OBFTheme.windowHeight)
         .background(OBFTheme.bg)
         .onAppear {
             if CommandLine.arguments.contains("--replay-bug2") {
@@ -36,27 +36,63 @@ struct ContentView: View {
     }
 }
 
-/// Sidebar frame in window coordinates, reported upward so the swipe-event
-/// monitor can tell whether the gesture happened over the sidebar.
-private struct SidebarFrameKey: PreferenceKey {
-    static var defaultValue: CGRect = .zero
-    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
-        value = nextValue()
+/// Direction of a sidebar tab switch.
+enum SidebarTabMove: Equatable {
+    case next, prev
+}
+
+/// Recognizes a deliberate two-finger horizontal swipe from a trackpad's
+/// scroll-event stream. NSEventTypeSwipe gestures are only generated when
+/// the system "swipe between pages" setting produces them (turning that
+/// setting OFF removes swipe events entirely), so tabs are driven off
+/// scroll phases instead — the same technique browsers use for trackpad
+/// back/forward. Vertical scrolling and mouse wheels never trigger:
+/// trackpad gestures carry phases, and the swipe must be strongly
+/// horizontal-dominant.
+struct HorizontalSwipeRecognizer {
+    private var accumulatedX: CGFloat = 0
+    private var accumulatedY: CGFloat = 0
+    private var triggered = false
+
+    /// Horizontal travel beyond which the swipe fires, in points.
+    static let threshold: CGFloat = 60
+
+    mutating private func reset() {
+        accumulatedX = 0
+        accumulatedY = 0
+        triggered = false
+    }
+
+    /// Leftward swipe (fingers move left) reports .next, rightward .prev.
+    /// Fires at most once per gesture; returns nil while inconclusive.
+    mutating func handle(phase: NSEvent.Phase, deltaX: CGFloat, deltaY: CGFloat) -> SidebarTabMove? {
+        if phase.contains(.began) {
+            reset()
+        }
+        guard !triggered else { return nil }
+        guard phase.contains(.began) || phase.contains(.changed) else { return nil }
+        accumulatedX += deltaX
+        accumulatedY += deltaY
+        guard abs(accumulatedX) > HorizontalSwipeRecognizer.threshold,
+              abs(accumulatedX) > abs(accumulatedY) * 1.5 else { return nil }
+        triggered = true
+        // Natural scrolling: fingers moving left produce negative deltas.
+        return accumulatedX < 0 ? .next : .prev
     }
 }
 
-/// Class box so the swipe monitor's closure always reads the current frame
+/// Class box so the scroll monitor's closure can mutate recognizer state
 /// (a captured struct value would freeze at install time).
-private final class SidebarFrameBox {
-    var value: CGRect = .zero
+private final class SidebarGestureBox {
+    var recognizer = HorizontalSwipeRecognizer()
 }
 
 struct SidebarView: View {
     @EnvironmentObject private var appState: AppState
     @State private var hoveringTitle = false
     @State private var hoveringList = false
-    @State private var frameBox = SidebarFrameBox()
-    @State private var swipeMonitor: Any?
+    @State private var gestureBox = SidebarGestureBox()
+    @State private var scrollMonitor: Any?
 
     private var tabListVisible: Bool { hoveringTitle || hoveringList }
 
@@ -70,20 +106,14 @@ struct SidebarView: View {
             tabBar
         }
         .animation(.easeInOut(duration: 0.15), value: appState.sidebarTab)
-        .background(
-            GeometryReader { geo in
-                Color.clear.preference(key: SidebarFrameKey.self, value: geo.frame(in: .global))
-            }
-        )
-        .onPreferenceChange(SidebarFrameKey.self) { frameBox.value = $0 }
         .onAppear {
-            installSwipeMonitor()
+            installScrollMonitor()
         }
         .onDisappear {
-            if let swipeMonitor {
-                NSEvent.removeMonitor(swipeMonitor)
+            if let scrollMonitor {
+                NSEvent.removeMonitor(scrollMonitor)
             }
-            swipeMonitor = nil
+            scrollMonitor = nil
         }
     }
 
@@ -210,31 +240,54 @@ struct SidebarView: View {
 
     // MARK: - Two-finger swipe
 
-    /// Two-finger swipe over the sidebar: left advances to the next tab,
-    /// right goes back to the previous one. Swipe events travel the AppKit
-    /// responder chain, which SwiftUI sidebar views are not part of, so a
-    /// local monitor checks the gesture location against the sidebar frame.
-    private func installSwipeMonitor() {
-        guard swipeMonitor == nil else { return }
-        swipeMonitor = NSEvent.addLocalMonitorForEvents(matching: .swipe) { [appState, frameBox] event in
-            guard let window = event.window,
-                  let content = window.contentView else { return event }
-            let global = frameBox.value
-            // .global is top-left based; event locations are bottom-left based.
-            let cocoa = CGRect(
-                x: global.minX,
-                y: content.bounds.height - global.maxY,
-                width: global.width,
-                height: global.height
-            )
-            guard cocoa.contains(event.locationInWindow) else { return event }
-            if event.deltaX < 0 {
-                appState.selectNextSidebarTab()
-                return nil
+    /// Two-finger horizontal swipe over the sidebar: fingers left advance
+    /// to the next tab, fingers right go back to the previous one. Driven
+    /// off scrollWheel events with gesture phases — NSEventTypeSwipe is not
+    /// generated at all when "swipe between pages" is off in System
+    /// Settings. Installed as a local monitor because SwiftUI views are not
+    /// part of the AppKit responder chain that receives gesture events.
+    private func installScrollMonitor() {
+        guard scrollMonitor == nil else { return }
+        scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [appState, gestureBox] event in
+            if SelfTest.loggingScrollEvents {
+                SelfTest.debugScrollLog.append(
+                    "phase=\(event.phase.rawValue) dx=\(event.scrollingDeltaX) dy=\(event.scrollingDeltaY) loc=\(event.locationInWindow)"
+                )
             }
-            if event.deltaX > 0 {
+            // Mouse wheels and momentum phases carry no gesture phase.
+            guard event.phase != [] else { return event }
+            // Synthetic posted events have no associated window; for them
+            // locationInWindow is a screen point. Real gesture events are
+            // always window-relative already.
+            let location: NSPoint
+            if event.window != nil {
+                location = event.locationInWindow
+            } else if let window = NSApp.keyWindow ?? NSApp.windows.first {
+                location = window.convertPoint(fromScreen: event.locationInWindow)
+            } else {
+                return event
+            }
+            // The window layout is fixed and not resizable: the sidebar is
+            // the rightmost sidebarWidth points of the content, inset by
+            // the content padding (see OBFTheme).
+            let sidebar = CGRect(
+                x: OBFTheme.windowWidth - OBFTheme.contentPadding - OBFTheme.sidebarWidth,
+                y: OBFTheme.contentPadding,
+                width: OBFTheme.sidebarWidth,
+                height: OBFTheme.windowHeight - OBFTheme.contentPadding * 2
+            )
+            guard sidebar.contains(location) else { return event }
+            switch gestureBox.recognizer.handle(
+                phase: event.phase,
+                deltaX: event.scrollingDeltaX,
+                deltaY: event.scrollingDeltaY
+            ) {
+            case .next:
+                appState.selectNextSidebarTab()
+            case .prev:
                 appState.selectPrevSidebarTab()
-                return nil
+            case nil:
+                break
             }
             return event
         }

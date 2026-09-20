@@ -23,6 +23,9 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
         textView.onInsertNewline = { [weak self] in
             self?.handleInsertNewline() ?? false
         }
+        textView.onDeleteBackward = { [weak self] in
+            self?.handleDeleteBackward() ?? false
+        }
         textView.onCommand = { [weak self] command in
             self?.handle(command: command)
         }
@@ -78,7 +81,7 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
         appState.store.save(markdown: serialize(storage: storage))
     }
 
-    private func serialize(storage: NSTextStorage) -> String {
+    func serialize(storage: NSTextStorage) -> String {
         let ns = storage.string as NSString
         guard ns.length > 0 else { return "" }
         var lines: [String] = []
@@ -87,6 +90,15 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
             let content = self.contentRange(of: enclosing)
             var line = substring ?? ""
             if content.length > 0,
+               let task = storage.attribute(.obfTaskState, at: content.location, effectiveRange: nil) as? Int {
+                // The checkbox is presentation-only: drop its character and
+                // store the standard markdown task marker instead.
+                if line.hasPrefix("\u{FFFC}") {
+                    line = String(line.dropFirst())
+                }
+                let marker = task == 2 ? "- [x]" : "- [ ]"
+                line = line.isEmpty ? marker : marker + " " + line
+            } else if content.length > 0,
                let level = storage.attribute(.obfHeadingLevel, at: content.location, effectiveRange: nil) as? Int {
                 if level == 1 {
                     line = "# " + line
@@ -99,11 +111,22 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
         return lines.joined(separator: "\n")
     }
 
-    private func render(markdown: String) -> NSAttributedString {
+    func render(markdown: String) -> NSAttributedString {
         let result = NSMutableAttributedString()
         let lines = parseLines(markdown)
         for (index, line) in lines.enumerated() {
-            result.append(NSAttributedString(string: line.text, attributes: styleAttributes(for: line.level)))
+            if let task = line.task {
+                // The checkbox is a single attachment character at the
+                // paragraph start; the gap after it is transparent padding
+                // inside the attachment image itself.
+                let attributes = styleAttributes(for: nil, task: task)
+                var attachmentAttributes = attributes
+                attachmentAttributes[.attachment] = checkboxAttachment(done: task == 2)
+                result.append(NSAttributedString(string: "\u{FFFC}", attributes: attachmentAttributes))
+                result.append(NSAttributedString(string: line.text, attributes: attributes))
+            } else {
+                result.append(NSAttributedString(string: line.text, attributes: styleAttributes(for: line.level)))
+            }
             if index < lines.count - 1 {
                 result.append(NSAttributedString(string: "\n", attributes: styleAttributes(for: nil)))
             }
@@ -111,11 +134,12 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
         return result
     }
 
-    private func parseLines(_ markdown: String) -> [(text: String, level: Int?)] {
-        var lines: [(String, Int?)] = []
+    private func parseLines(_ markdown: String) -> [(text: String, level: Int?, task: Int?)] {
+        var lines: [(String, Int?, Int?)] = []
         (markdown as NSString).enumerateLines { rawLine, _ in
             var line = rawLine
             var level: Int? = nil
+            var task: Int? = nil
             if line == "#" {
                 level = 1
                 line = ""
@@ -128,15 +152,72 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
             } else if line.hasPrefix("## ") {
                 level = 2
                 line = String(line.dropFirst(3))
+            } else if line == "- [ ]" || line == "- [x]" || line == "- [X]" {
+                task = line == "- [ ]" ? 1 : 2
+                line = ""
+            } else if line.hasPrefix("- [ ] ") {
+                task = 1
+                line = String(line.dropFirst(6))
+            } else if line.hasPrefix("- [x] ") || line.hasPrefix("- [X] ") {
+                task = 2
+                line = String(line.dropFirst(6))
             }
-            lines.append((line, level))
+            lines.append((line, level, task))
         }
         return lines
     }
 
     // MARK: - Styling
 
-    func styleAttributes(for level: Int?) -> [NSAttributedString.Key: Any] {
+    /// Total width the checkbox occupies, including the gap before the text.
+    /// Wrapped lines of a task align to exactly this indent.
+    private var checkboxTotalWidth: CGFloat {
+        ceil(appState.bodyFont.pointSize * 0.85) + 6
+    }
+
+    /// Cache by (done, font size); zooming restyles the whole document, so
+    /// new sizes appear then.
+    private var checkboxImageCache: [Int: NSImage] = [:]
+
+    private func checkboxAttachment(done: Bool) -> NSTextAttachment {
+        let font = appState.bodyFont
+        let key = (done ? 100_000 : 0) + Int(font.pointSize * 10)
+        if checkboxImageCache[key] == nil {
+            let side = ceil(font.pointSize * 0.85)
+            let gap: CGFloat = 6
+            let image = NSImage(size: NSSize(width: side + gap, height: side), flipped: false) { _ in
+                let inset: CGFloat = 0.75
+                let box = NSRect(x: inset, y: inset, width: side - inset * 2, height: side - inset * 2)
+                let outline = NSBezierPath(roundedRect: box, xRadius: 3, yRadius: 3)
+                outline.lineWidth = 1.2
+                OBFTheme.textNS.setStroke()
+                outline.stroke()
+                if done {
+                    let check = NSBezierPath()
+                    check.move(to: NSPoint(x: side * 0.24, y: side * 0.52))
+                    check.line(to: NSPoint(x: side * 0.44, y: side * 0.30))
+                    check.line(to: NSPoint(x: side * 0.78, y: side * 0.70))
+                    check.lineWidth = 1.6
+                    check.lineCapStyle = .round
+                    check.lineJoinStyle = .round
+                    OBFTheme.textNS.setStroke()
+                    check.stroke()
+                }
+                return true
+            }
+            checkboxImageCache[key] = image
+        }
+        let attachment = NSTextAttachment()
+        attachment.image = checkboxImageCache[key]
+        // Attachments sit on the baseline; lift the box so it is vertically
+        // centered on the cap height of the surrounding text.
+        let side = ceil(font.pointSize * 0.85)
+        let y = round((font.capHeight - side) / 2)
+        attachment.bounds = NSRect(x: 0, y: y, width: checkboxTotalWidth, height: side)
+        return attachment
+    }
+
+    func styleAttributes(for level: Int?, task: Int? = nil) -> [NSAttributedString.Key: Any] {
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byWordWrapping
         var attributes: [NSAttributedString.Key: Any] = [
@@ -155,6 +236,19 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
         }
         if let level {
             attributes[.obfHeadingLevel] = level
+        }
+        if let task {
+            // Hanging indent: wrapped lines align with the text after the
+            // checkbox. Spacing keeps tasks visually separated from the
+            // paragraphs above and below.
+            paragraph.firstLineHeadIndent = 0
+            paragraph.headIndent = checkboxTotalWidth
+            paragraph.paragraphSpacingBefore = 6
+            paragraph.paragraphSpacing = 6
+            attributes[.obfTaskState] = task
+            if task == 2 {
+                attributes[.foregroundColor] = OBFTheme.textNS.withAlphaComponent(0.45)
+            }
         }
         return attributes
     }
@@ -180,11 +274,38 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
             guard enclosing.length > 0 else { return }
             let content = self.contentRange(of: enclosing)
             var level: Int? = nil
+            var task: Int? = nil
             if content.length > 0 {
                 level = storage.attribute(.obfHeadingLevel, at: content.location, effectiveRange: nil) as? Int
+                task = storage.attribute(.obfTaskState, at: content.location, effectiveRange: nil) as? Int
+            }
+            if task != nil, content.length > 0 {
+                if ns.character(at: content.location) == 0xFFFC {
+                    // A paragraph is either a heading or a task; the task
+                    // wins if both markers somehow coexist.
+                    if level != nil {
+                        storage.removeAttribute(.obfHeadingLevel, range: enclosing)
+                        level = nil
+                    }
+                } else {
+                    // A task without its checkbox character is a broken
+                    // task (the character was deleted): heal by dropping
+                    // the marker, restyling the paragraph as body text.
+                    storage.removeAttribute(.obfTaskState, range: enclosing)
+                    task = nil
+                }
             }
             if content.length > 0 {
-                storage.setAttributes(self.styleAttributes(for: level), range: content)
+                storage.setAttributes(self.styleAttributes(for: level, task: task), range: content)
+                if let task {
+                    // setAttributes above wipes the attachment attribute;
+                    // put the checkbox image back, sized to the current font.
+                    storage.addAttribute(
+                        .attachment,
+                        value: self.checkboxAttachment(done: task == 2),
+                        range: NSRange(location: content.location, length: 1)
+                    )
+                }
             }
             let terminatorLength = enclosing.length - content.length
             if terminatorLength > 0 {
@@ -230,7 +351,10 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
         let level = content.length > 0
             ? storage.attribute(.obfHeadingLevel, at: content.location, effectiveRange: nil) as? Int
             : nil
-        textView.typingAttributes = styleAttributes(for: level)
+        let task = content.length > 0
+            ? storage.attribute(.obfTaskState, at: content.location, effectiveRange: nil) as? Int
+            : nil
+        textView.typingAttributes = styleAttributes(for: level, task: task)
     }
 
     // MARK: - Storage observation
@@ -398,7 +522,146 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
             appState.showFindBar()
         case .heading(let level):
             setHeadingLevel(level)
+        case .task:
+            toggleTask()
+        case .taskDone:
+            toggleTaskDone()
         }
+    }
+
+    // MARK: - Tasks
+
+    /// Cmd+3: toggles the task state of the paragraphs intersecting the
+    /// selection. A task paragraph starts with a checkbox character (a text
+    /// attachment whose image width includes the gap before the text);
+    /// markdown-wise it is stored as "- [ ]" / "- [x]". A paragraph is
+    /// either a heading or a task — toggling one clears the other.
+    func toggleTask() {
+        guard let textView, let storage = textView.textStorage else { return }
+        let ns = storage.string as NSString
+        let selection = textView.selectedRange()
+        let target: NSRange
+        if selection.length > 0, ns.length > 0 {
+            let bounded = NSIntersectionRange(selection, NSRange(location: 0, length: ns.length))
+            let reference = bounded.length > 0
+                ? bounded
+                : NSRange(location: min(selection.location, ns.length - 1), length: 0)
+            target = ns.paragraphRange(for: reference)
+        } else {
+            target = paragraphRange(at: min(selection.location, ns.length))
+        }
+
+        var paragraphs: [NSRange] = []
+        if target.length > 0 {
+            ns.enumerateSubstrings(in: target, options: .byParagraphs) { _, _, enclosing, _ in
+                if enclosing.length > 0 {
+                    paragraphs.append(enclosing)
+                }
+            }
+        }
+        if paragraphs.isEmpty {
+            // Empty document or an empty paragraph.
+            paragraphs = [NSRange(location: min(selection.location, ns.length), length: 0)]
+        }
+
+        var caretDelta = 0
+        storage.beginEditing()
+        // Last paragraph first: character insertions/deletions shift the
+        // ranges of everything below.
+        for paragraph in paragraphs.reversed() {
+            let content = contentRange(of: paragraph)
+            let state = content.length > 0
+                ? storage.attribute(.obfTaskState, at: content.location, effectiveRange: nil) as? Int
+                : nil
+            if state != nil {
+                // Remove the task: drop the checkbox character, keep the text.
+                if ns.character(at: content.location) == 0xFFFC {
+                    storage.deleteCharacters(in: NSRange(location: content.location, length: 1))
+                    storage.removeAttribute(
+                        .obfTaskState,
+                        range: NSRange(location: paragraph.location, length: max(paragraph.length - 1, 0))
+                    )
+                } else {
+                    storage.removeAttribute(.obfTaskState, range: paragraph)
+                }
+                if paragraph.location <= selection.location {
+                    caretDelta -= 1
+                }
+            } else {
+                if paragraph.length > 0 {
+                    storage.removeAttribute(.obfHeadingLevel, range: paragraph)
+                }
+                storage.insert(
+                    NSAttributedString(string: "\u{FFFC}", attributes: styleAttributes(for: nil, task: 1)),
+                    at: paragraph.location
+                )
+                storage.addAttribute(
+                    .obfTaskState,
+                    value: 1,
+                    range: NSRange(location: paragraph.location, length: content.length + 1)
+                )
+                if paragraph.location <= selection.location {
+                    caretDelta += 1
+                }
+            }
+        }
+        storage.endEditing()
+
+        let caret = min(max(selection.location + caretDelta, 0), storage.length)
+        textView.setSelectedRange(NSRange(location: caret, length: 0))
+        applyStyles(in: NSRange(location: 0, length: storage.length))
+        applyMatchHighlight()
+        syncTypingAttributes()
+        scheduleRefresh()
+    }
+
+    /// Cmd+4: toggles done state of the task under the selection.
+    func toggleTaskDone() {
+        guard let textView, let storage = textView.textStorage, storage.length > 0 else { return }
+        let ns = storage.string as NSString
+        let selection = textView.selectedRange()
+        let bounded = NSIntersectionRange(selection, NSRange(location: 0, length: ns.length))
+        let reference = bounded.length > 0
+            ? bounded
+            : NSRange(location: min(selection.location, max(ns.length - 1, 0)), length: 0)
+        let target = ns.paragraphRange(for: reference)
+
+        var toggled = false
+        storage.beginEditing()
+        ns.enumerateSubstrings(in: target, options: .byParagraphs) { _, _, enclosing, _ in
+            guard enclosing.length > 0 else { return }
+            let content = self.contentRange(of: enclosing)
+            guard content.length > 0,
+                  let state = storage.attribute(.obfTaskState, at: content.location, effectiveRange: nil) as? Int
+            else { return }
+            storage.addAttribute(.obfTaskState, value: state == 2 ? 1 : 2, range: enclosing)
+            toggled = true
+        }
+        storage.endEditing()
+        guard toggled else { return }
+        applyStyles(in: target)
+        applyMatchHighlight()
+        scheduleRefresh()
+    }
+
+    /// Backspace with the caret immediately after the checkbox removes the
+    /// task formatting but keeps the text.
+    private func handleDeleteBackward() -> Bool {
+        guard let textView, let storage = textView.textStorage, storage.length > 0 else { return false }
+        let selection = textView.selectedRange()
+        guard selection.length == 0, selection.location > 0, selection.location <= storage.length else { return false }
+        let paragraph = paragraphRange(at: selection.location)
+        let content = contentRange(of: paragraph)
+        guard content.length > 1,
+              storage.attribute(.obfTaskState, at: content.location, effectiveRange: nil) != nil,
+              selection.location == content.location + 1 else { return false }
+        storage.deleteCharacters(in: NSRange(location: content.location, length: 1))
+        let updated = paragraphRange(at: content.location)
+        storage.removeAttribute(.obfTaskState, range: updated)
+        textView.setSelectedRange(NSRange(location: content.location, length: 0))
+        applyStyles(in: updated)
+        syncTypingAttributes()
+        return true
     }
 
     // MARK: - Zoom
@@ -425,7 +688,8 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
     // MARK: - Enter at end of heading
 
     /// Returns true when the newline was handled here: Enter at the end of a
-    /// heading paragraph inserts a plain newline styled as body text.
+    /// heading paragraph inserts a plain newline styled as body text, and
+    /// Enter inside a task finishes it.
     private func handleInsertNewline() -> Bool {
         guard let textView, let storage = textView.textStorage, storage.length > 0 else { return false }
         let selection = textView.selectedRange()
@@ -434,6 +698,33 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
         let location = min(selection.location, ns.length - 1)
         let paragraph = ns.paragraphRange(for: NSRange(location: location, length: 0))
         let content = contentRange(of: paragraph)
+
+        // Enter inside a task finishes it: the text after the caret (if
+        // any) becomes a plain body paragraph without the indent. Enter on
+        // an empty task (checkbox only) just removes the checkbox. Enter
+        // before the checkbox falls through to the default newline.
+        if content.length > 0,
+           storage.attribute(.obfTaskState, at: content.location, effectiveRange: nil) as? Int != nil,
+           selection.location > content.location {
+            if content.length == 1 {
+                let start = content.location
+                storage.deleteCharacters(in: NSRange(location: start, length: 1))
+                let updated = paragraphRange(at: start)
+                storage.removeAttribute(.obfTaskState, range: updated)
+                textView.setSelectedRange(NSRange(location: start, length: 0))
+                applyStyles(in: updated)
+                syncTypingAttributes()
+                return true
+            }
+            textView.typingAttributes = styleAttributes(for: nil)
+            textView.insertText("\n", replacementRange: selection)
+            let tail = paragraphRange(at: selection.location + 1)
+            storage.removeAttribute(.obfTaskState, range: tail)
+            textView.setSelectedRange(NSRange(location: selection.location + 1, length: 0))
+            textView.typingAttributes = styleAttributes(for: nil)
+            return true
+        }
+
         guard content.length > 0,
               storage.attribute(.obfHeadingLevel, at: content.location, effectiveRange: nil) as? Int != nil,
               selection.location == NSMaxRange(content) else { return false }

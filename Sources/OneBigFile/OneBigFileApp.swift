@@ -35,7 +35,7 @@ struct OneBigFileApp: App {
         Window("One Big File", id: "main") {
             ContentView()
                 .environmentObject(appState)
-                .frame(width: 1200, height: 800)
+                .frame(width: OBFTheme.windowWidth, height: OBFTheme.windowHeight)
                 .preferredColorScheme(.dark)
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
                     appState.editor?.saveNow()
@@ -73,6 +73,16 @@ struct OneBigFileApp: App {
                     appState.editor?.setHeadingLevel(0)
                 }
                 .keyboardShortcut("0", modifiers: .command)
+
+                Button("Задание") {
+                    appState.editor?.toggleTask()
+                }
+                .keyboardShortcut("3", modifiers: .command)
+
+                Button("Задание выполнено") {
+                    appState.editor?.toggleTaskDone()
+                }
+                .keyboardShortcut("4", modifiers: .command)
 
                 Divider()
 

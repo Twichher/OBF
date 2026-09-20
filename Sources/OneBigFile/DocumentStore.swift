@@ -1,7 +1,11 @@
 import Foundation
 
 final class DocumentStore {
-    let fileURL = URL(fileURLWithPath: "/Users/vladflorinskij/Documents/obf_project/onebigfile.md")
+    let fileURL: URL
+
+    init(fileURL: URL = URL(fileURLWithPath: "/Users/vladflorinskij/Documents/obf_project/onebigfile.md")) {
+        self.fileURL = fileURL
+    }
 
     func load() -> String {
         if !FileManager.default.fileExists(atPath: fileURL.path) {
