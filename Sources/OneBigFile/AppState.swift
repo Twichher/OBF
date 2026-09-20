@@ -15,6 +15,26 @@ struct OutlineItem: Identifiable, Equatable {
     }
 }
 
+/// Sidebar tabs, in display order. Switchable via the arrows next to the
+/// tab title, the hover list, and two-finger swipe gestures.
+enum SidebarTab: Int, CaseIterable, Identifiable {
+    case structure, tasks, deadlines, routine, photos, files, control
+
+    var id: Int { rawValue }
+
+    var title: String {
+        switch self {
+        case .structure: return "Структура"
+        case .tasks: return "Задания"
+        case .deadlines: return "Дедлайны"
+        case .routine: return "Рутина"
+        case .photos: return "Фотографии"
+        case .files: return "Файлы"
+        case .control: return "Управление"
+        }
+    }
+}
+
 final class AppState: ObservableObject {
     @Published var outline: [OutlineItem] = []
     @Published var findVisible = false
@@ -22,6 +42,7 @@ final class AppState: ObservableObject {
     @Published var matches: [NSRange] = []
     @Published var currentMatchIndex = 0
     @Published var findFocusRequest = 0
+    @Published var sidebarTab: SidebarTab = .structure
 
     @Published var bodyPointSize: Double = {
         let saved = UserDefaults.standard.object(forKey: "bodyPointSize") as? Double
@@ -46,6 +67,20 @@ final class AppState: ObservableObject {
     var bodyFont: NSFont { OBFTheme.font(size: bodyPointSize, bold: false) }
     var h2Font: NSFont { OBFTheme.font(size: bodyPointSize + 4, bold: true) }
     var h1Font: NSFont { OBFTheme.font(size: bodyPointSize + 10, bold: true) }
+
+    func selectNextSidebarTab() {
+        moveSidebarTab(by: 1)
+    }
+
+    func selectPrevSidebarTab() {
+        moveSidebarTab(by: -1)
+    }
+
+    private func moveSidebarTab(by delta: Int) {
+        let count = SidebarTab.allCases.count
+        let raw = (sidebarTab.rawValue + delta + count) % count
+        sidebarTab = SidebarTab(rawValue: raw) ?? .structure
+    }
 
     func showFindBar() {
         findVisible = true

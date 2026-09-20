@@ -8,6 +8,9 @@ enum OBFTheme {
     static let textNS = NSColor(calibratedRed: 0xC9 / 255.0, green: 0xCD / 255.0, blue: 0xD6 / 255.0, alpha: 1)
     static let borderNS = NSColor(calibratedRed: 0x26 / 255.0, green: 0x26 / 255.0, blue: 0x2C / 255.0, alpha: 1)
     static let selectionNS = NSColor(calibratedRed: 0x38 / 255.0, green: 0x50 / 255.0, blue: 0x6E / 255.0, alpha: 1)
+    /// Floating panels (the sidebar tab list) — a step lighter than the
+    /// background so they read as being above the content behind them.
+    static let elevatedNS = NSColor(calibratedRed: 0x1B / 255.0, green: 0x1B / 255.0, blue: 0x22 / 255.0, alpha: 1)
     /// H1 text color — a bright amber so first-level headings stand out
     /// from body text and from H2.
     static let h1TextNS = NSColor(calibratedRed: 0xFF / 255.0, green: 0xB4 / 255.0, blue: 0x4D / 255.0, alpha: 1)
@@ -15,6 +18,7 @@ enum OBFTheme {
     static let bg = Color(nsColor: bgNS)
     static let text = Color(nsColor: textNS)
     static let border = Color(nsColor: borderNS)
+    static let elevated = Color(nsColor: elevatedNS)
 
     static let minBodySize: Double = 10
     static let maxBodySize: Double = 28

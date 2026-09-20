@@ -349,7 +349,10 @@ enum SelfTest {
     /// measures the editor geometry right after launch (no user actions) and
     /// again after a programmatic scroll, printing text view / clip view /
     /// text container widths and the rightmost laid-out line fragment.
-    /// Launched with --uitest-open; exits the process when done.
+    /// Also captures window snapshots for visual inspection of the sidebar:
+    /// initial state, the tab list under a simulated hover over the tab
+    /// title, and an empty tab. Launched with --uitest-open; exits the
+    /// process when done.
     static func measureOpen(appState: AppState) {
         func measure(_ label: String) {
             guard let coordinator = appState.editor as? Coordinator,
@@ -372,16 +375,73 @@ enum SelfTest {
                 || textView.frame.width > sv.contentSize.width + 0.5
             print("OPEN-MEASURE \(label): tvW=\(textView.frame.width) clipW=\(sv.contentSize.width) contW=\(tc.containerSize.width) usedW=\(used.width) maxRight=\(maxRight) overflow=\(overflow)")
         }
+        /// Renders the window's own view hierarchy — no screen-recording
+        /// permission needed, unlike CGWindowListCreateImage.
+        func snap(_ window: NSWindow, _ name: String) {
+            guard let view = window.contentView,
+                  let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+                print("OPEN-MEASURE snap \(name): FAILED")
+                return
+            }
+            view.cacheDisplay(in: view.bounds, to: rep)
+            if let data = rep.representation(using: .png, properties: [:]) {
+                try? data.write(to: URL(fileURLWithPath: "/tmp/obf_open_\(name).png"))
+            }
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
             measure("t=0.8")
             guard let coordinator = appState.editor as? Coordinator,
                   let textView = coordinator.debugTextView,
-                  let sv = textView.enclosingScrollView else { exit(1) }
-            sv.contentView.scroll(to: NSPoint(x: 0, y: 120))
-            sv.reflectScrolledClipView(sv.contentView)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                measure("after-scroll")
-                exit(0)
+                  let sv = textView.enclosingScrollView,
+                  let window = textView.window,
+                  let content = window.contentView else { exit(1) }
+            snap(window, "1_initial")
+
+            // Simulate hovering the sidebar tab title: warp the cursor onto
+            // it and post a mouse-moved so SwiftUI's onHover fires. The
+            // point comes from the fixed layout: content is 1200x800 with
+            // 16 pt padding; the 260 pt sidebar sits on the right, its tab
+            // title centered at the bottom bar.
+            let hoverPoint = NSPoint(x: 924 + 130, y: 40)
+            let restore = CGEvent(source: nil)?.location
+            let screenRect = window.convertToScreen(CGRect(origin: hoverPoint, size: .zero))
+            let mainHeight = NSScreen.screens.first?.frame.height ?? 0
+            CGWarpMouseCursorPosition(CGPoint(x: screenRect.origin.x, y: mainHeight - screenRect.origin.y))
+            if let moved = NSEvent.mouseEvent(
+                with: .mouseMoved,
+                location: hoverPoint,
+                modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: 0,
+                clickCount: 0,
+                pressure: 0
+            ) {
+                NSApplication.shared.postEvent(moved, atStart: false)
+                // Tracking areas refresh on layout; a second nudge after a
+                // beat makes sure the hover state sticks.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    NSApplication.shared.postEvent(moved, atStart: false)
+                }
+            }
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                snap(window, "2_hover_tablist")
+                appState.sidebarTab = .tasks
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    snap(window, "3_empty_tab")
+                    if let restore {
+                        CGWarpMouseCursorPosition(restore)
+                    }
+                    sv.contentView.scroll(to: NSPoint(x: 0, y: 120))
+                    sv.reflectScrolledClipView(sv.contentView)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                        measure("after-scroll")
+                        _ = content
+                        exit(0)
+                    }
+                }
             }
         }
     }

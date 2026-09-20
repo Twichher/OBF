@@ -12,7 +12,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.contains("--uitest-bug2") {
             exit(SelfTest.runUITestBug2())
         }
-        if CommandLine.arguments.contains("--replay-bug2") {
+        if CommandLine.arguments.contains("--replay-bug2")
+            || CommandLine.arguments.contains("--uitest-open") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                 NSApp.activate(ignoringOtherApps: true)
                 NSApp.windows.first?.makeKeyAndOrderFront(nil)
