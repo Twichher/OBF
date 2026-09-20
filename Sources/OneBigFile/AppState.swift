@@ -50,12 +50,16 @@ final class AppState: ObservableObject {
     func showFindBar() {
         findVisible = true
         findFocusRequest += 1
+        // Opening search drops any text selection made before it, so the
+        // only highlight on screen is the current match.
+        editor?.clearSelection()
         editor?.updateFindMatches()
     }
 
     func closeFind() {
         findVisible = false
         editor?.clearFindHighlight()
+        editor?.clearSelection()
         editor?.focusEditor()
     }
 }

@@ -29,6 +29,9 @@ struct ContentView: View {
             if CommandLine.arguments.contains("--replay-bug2") {
                 SelfTest.replayBug2(appState: appState)
             }
+            if CommandLine.arguments.contains("--uitest-open") {
+                SelfTest.measureOpen(appState: appState)
+            }
         }
     }
 }

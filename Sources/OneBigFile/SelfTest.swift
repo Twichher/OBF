@@ -29,6 +29,9 @@ enum SelfTest {
         print("== G: typing over a selection (crash repro, issue #4-style) ==")
         if !scenarioG() { failures += 1 }
 
+        print("== H: find clears selection; highlight survives edits/zoom; close clears all ==")
+        if !scenarioH() { failures += 1 }
+
         print(failures == 0 ? "SELFTEST OK" : "SELFTEST FAILED (\(failures))")
         return failures == 0 ? 0 : 1
     }
@@ -301,6 +304,86 @@ enum SelfTest {
         ok = ok && highlighted && survived
         print("    -> OK: \(ok)")
         return ok
+    }
+
+    /// Cmd+F must drop the pre-existing selection; the match highlight must
+    /// survive edits, whole-document restyles (zoom) and background
+    /// refreshes; closing find must remove both the highlight and any
+    /// selection left in the text.
+    private static func scenarioH() -> Bool {
+        let (appState, textView, coordinator, storage) = makeStack()
+        appState.editor = coordinator
+
+        type(textView, "альфа бета\nальфа гамма\nальфа дельта")
+
+        // A selection made before searching must be cleared by Cmd+F.
+        textView.setSelectedRange(NSRange(location: 0, length: 5))
+        appState.findQuery = "альфа"
+        appState.showFindBar()
+        let selectionClearedOnOpen = textView.selectedRange().length == 0
+        let highlightedOnOpen = hasBackgroundAttribute(storage)
+
+        // Typing restyles the paragraph on the next run-loop turn; the
+        // highlight must be re-applied there, not 0.5 s later.
+        type(textView, "!")
+        pump()
+        let highlightedAfterEdit = hasBackgroundAttribute(storage)
+
+        // Zoom restyles the whole document without any character edit.
+        coordinator.zoomIn()
+        let highlightedAfterZoom = hasBackgroundAttribute(storage)
+
+        // Closing find removes the highlight and any selection.
+        textView.setSelectedRange(NSRange(location: 2, length: 3))
+        appState.closeFind()
+        let clearedOnClose = !hasBackgroundAttribute(storage) && textView.selectedRange().length == 0
+
+        print("    open: selCleared=\(selectionClearedOnOpen) highlighted=\(highlightedOnOpen)")
+        print("    afterEdit=\(highlightedAfterEdit) afterZoom=\(highlightedAfterZoom) clearedOnClose=\(clearedOnClose)")
+        let ok = selectionClearedOnOpen && highlightedOnOpen && highlightedAfterEdit && highlightedAfterZoom && clearedOnClose
+        print("    -> OK: \(ok)")
+        return ok
+    }
+
+    /// Reproduces "lines overflow the working area until the first scroll":
+    /// measures the editor geometry right after launch (no user actions) and
+    /// again after a programmatic scroll, printing text view / clip view /
+    /// text container widths and the rightmost laid-out line fragment.
+    /// Launched with --uitest-open; exits the process when done.
+    static func measureOpen(appState: AppState) {
+        func measure(_ label: String) {
+            guard let coordinator = appState.editor as? Coordinator,
+                  let textView = coordinator.debugTextView,
+                  let lm = textView.layoutManager,
+                  let tc = textView.textContainer,
+                  let sv = textView.enclosingScrollView else {
+                print("OPEN-MEASURE \(label): missing view stack")
+                return
+            }
+            lm.ensureLayout(for: tc)
+            let used = lm.usedRect(for: tc)
+            var maxRight: CGFloat = 0
+            if lm.numberOfGlyphs > 0 {
+                lm.enumerateLineFragments(forGlyphRange: NSRange(location: 0, length: lm.numberOfGlyphs)) { rect, _, _, _, _ in
+                    maxRight = max(maxRight, rect.maxX)
+                }
+            }
+            let overflow = maxRight > tc.containerSize.width + 0.5
+                || textView.frame.width > sv.contentSize.width + 0.5
+            print("OPEN-MEASURE \(label): tvW=\(textView.frame.width) clipW=\(sv.contentSize.width) contW=\(tc.containerSize.width) usedW=\(used.width) maxRight=\(maxRight) overflow=\(overflow)")
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            measure("t=0.8")
+            guard let coordinator = appState.editor as? Coordinator,
+                  let textView = coordinator.debugTextView,
+                  let sv = textView.enclosingScrollView else { exit(1) }
+            sv.contentView.scroll(to: NSPoint(x: 0, y: 120))
+            sv.reflectScrolledClipView(sv.contentView)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                measure("after-scroll")
+                exit(0)
+            }
+        }
     }
 
     /// Drives the REAL app window (SwiftUI stack included) through the

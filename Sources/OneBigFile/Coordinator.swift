@@ -168,6 +168,13 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
         guard ns.length > 0 else { return }
         let clamped = NSIntersectionRange(range, NSRange(location: 0, length: ns.length))
         guard clamped.length > 0 else { return }
+        // setAttributes below replaces every attribute in the restyled
+        // paragraphs, so a match highlight intersecting them no longer
+        // exists in the storage — forget it before it is re-applied.
+        if let highlighted = highlightedMatch,
+           NSIntersectionRange(highlighted, clamped).length > 0 {
+            highlightedMatch = nil
+        }
         storage.beginEditing()
         ns.enumerateSubstrings(in: clamped, options: .byParagraphs) { _, _, enclosing, _ in
             guard enclosing.length > 0 else { return }
@@ -231,7 +238,13 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
     @objc private func storageDidProcessEditing(_ note: Notification) {
         guard !isLoading else { return }
         guard let textView, let storage = textView.textStorage else { return }
-        if storage.editedMask.contains(.editedCharacters), storage.length > 0 {
+        // Only character edits schedule a refresh. Attribute-only edits
+        // (restyling, the find highlight itself) change no content, and
+        // scheduling from them made the debounced refresh re-apply the
+        // highlight and scroll back to the match every 0.5 s — an endless
+        // loop that fought the user's scrolling.
+        guard storage.editedMask.contains(.editedCharacters) else { return }
+        if storage.length > 0 {
             let edited = storage.editedRange
             if edited.location != NSNotFound {
                 let bounds = NSRange(location: 0, length: storage.length)
@@ -247,14 +260,16 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
                 // notification leaves stale glyphs on screen (a line joined
                 // with the previous one appears duplicated until the next
                 // full redraw). Defer to the next run-loop turn, when the
-                // edit has completed. The dropped match highlight (a plain
-                // background attribute) is re-applied by the next
-                // selectCurrentMatch / updateFindMatches.
+                // edit has completed. The match highlight dropped by
+                // restyling is re-applied right here (without scrolling),
+                // so it never visibly disappears after an edit.
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
-                    self.clearMatchHighlight()
                     self.applyStyles(in: affected)
                     self.syncTypingAttributes()
+                    if self.appState.findVisible {
+                        self.updateFindMatches(resetIndex: false, scroll: false)
+                    }
                     // AppKit's incremental redraw occasionally leaves stale
                     // pixels when content shifts by a line of a different
                     // height (e.g. after an H1 line was deleted). A full
@@ -279,7 +294,9 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
     private func refreshNow() {
         rebuildOutline()
         if appState.findVisible {
-            updateFindMatches(resetIndex: false)
+            // No scrolling here: this fires 0.5 s after the last edit, when
+            // the user may already have scrolled away from the match.
+            updateFindMatches(resetIndex: false, scroll: false)
         }
         saveNow()
     }
@@ -368,6 +385,7 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
         }
 
         applyStyles(in: target)
+        applyMatchHighlight()
         if styledAny {
             syncTypingAttributes()
         }
@@ -400,6 +418,7 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
         if let storage = textView.textStorage, storage.length > 0 {
             applyStyles(in: NSRange(location: 0, length: storage.length))
         }
+        applyMatchHighlight()
         syncTypingAttributes()
     }
 
@@ -438,10 +457,10 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
     // MARK: - Find
 
     func updateFindMatches() {
-        updateFindMatches(resetIndex: true)
+        updateFindMatches(resetIndex: true, scroll: true)
     }
 
-    private func updateFindMatches(resetIndex: Bool) {
+    private func updateFindMatches(resetIndex: Bool, scroll: Bool) {
         guard let storage = textView?.textStorage else { return }
         clearMatchHighlight()
         let query = appState.findQuery
@@ -467,7 +486,11 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
             appState.currentMatchIndex = ranges.isEmpty ? 0 : min(appState.currentMatchIndex, ranges.count - 1)
         }
         if !ranges.isEmpty {
-            selectCurrentMatch()
+            if scroll {
+                selectCurrentMatch()
+            } else {
+                applyMatchHighlight()
+            }
         }
     }
 
@@ -483,33 +506,47 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
         selectCurrentMatch()
     }
 
+    /// Highlights the current match and scrolls it into view. Used only for
+    /// explicit navigation (query change, next/prev, opening the bar) — never
+    /// from background refreshes, so the user's own scrolling is never
+    /// overridden.
     private func selectCurrentMatch() {
+        applyMatchHighlight()
+        guard let textView, let range = highlightedMatch else { return }
+        textView.scrollRangeToVisible(range)
+    }
+
+    /// The match is highlighted with a background attribute in the text
+    /// storage: it keeps selectionNS regardless of focus (AppKit would
+    /// otherwise draw the selection with system colors), it shifts with
+    /// edits like any attribute, and the text selection itself is left
+    /// alone so no "stuck" selection can survive closing the find bar.
+    private func applyMatchHighlight() {
         guard appState.findVisible else { return }
-        guard let textView,
-              let storage = textView.textStorage,
+        guard let storage = textView?.textStorage,
               appState.currentMatchIndex < appState.matches.count else { return }
         let range = appState.matches[appState.currentMatchIndex]
         guard NSMaxRange(range) <= storage.length else { return }
-        // The match is highlighted with a background attribute in the text
-        // storage: it keeps selectionNS regardless of focus (AppKit would
-        // otherwise draw the selection with system colors), it shifts with
-        // edits like any attribute, and the text selection itself is left
-        // alone so no "stuck" selection can survive closing the find bar.
+        // Already in place: touching the attribute again would only fire
+        // another round of storage notifications.
+        guard highlightedMatch != range else { return }
         clearMatchHighlight()
         storage.addAttribute(.backgroundColor, value: OBFTheme.selectionNS, range: range)
         highlightedMatch = range
-        textView.scrollRangeToVisible(range)
     }
 
     /// Callers must wrap edits in begin/end editing (or tolerate the
     /// resulting notifications): removing the attribute fires a storage
     /// notification of its own, and highlightedMatch is nil by then.
+    /// The attribute is cleared across the WHOLE storage, not just the
+    /// tracked range: text edits shift attributes along with the
+    /// characters, so the tracked range can be stale and a partial removal
+    /// would leave highlight residue behind. backgroundColor is used for
+    /// the find highlight only, so a full-range clear is safe.
     private func clearMatchHighlight() {
-        guard let storage = textView?.textStorage,
-              let range = highlightedMatch else { return }
-        let clamped = NSIntersectionRange(range, NSRange(location: 0, length: storage.length))
-        if clamped.length > 0 {
-            storage.removeAttribute(.backgroundColor, range: clamped)
+        guard highlightedMatch != nil, let storage = textView?.textStorage else { return }
+        if storage.length > 0 {
+            storage.removeAttribute(.backgroundColor, range: NSRange(location: 0, length: storage.length))
         }
         highlightedMatch = nil
     }
@@ -519,6 +556,15 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
         storage.beginEditing()
         clearMatchHighlight()
         storage.endEditing()
+    }
+
+    /// Collapses the text selection to a caret: opening and closing the
+    /// find bar must leave no selection behind anywhere in the document.
+    func clearSelection() {
+        guard let textView else { return }
+        let selection = textView.selectedRange()
+        guard selection.length > 0 else { return }
+        textView.setSelectedRange(NSRange(location: selection.location, length: 0))
     }
 
     func focusEditor() {

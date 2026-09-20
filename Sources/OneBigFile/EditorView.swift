@@ -34,6 +34,31 @@ final class OBFTextView: NSTextView {
         }
         return super.performKeyEquivalent(with: event)
     }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        needsLayout = true
+    }
+
+    override func layout() {
+        super.layout()
+        fitWidthToClipView()
+    }
+
+    /// Hard constraint: the text view is never wider than the visible area
+    /// of its scroll view. SwiftUI's window setup leaves the document view
+    /// at an intermediate, wider proposal (measured 1507 pt against a
+    /// 907 pt clip view), and then long lines overflow the right edge until
+    /// the first scroll re-syncs the width. Enforcing it at layout time
+    /// makes the text wrap correctly from the very first frame. The text
+    /// container insets (20/16) then act as strict left/right/top/bottom
+    /// margins.
+    private func fitWidthToClipView() {
+        guard let clipView = enclosingScrollView?.contentView else { return }
+        let width = clipView.bounds.width
+        guard width > 0, abs(frame.width - width) > 0.25 else { return }
+        frame.size.width = width
+    }
 }
 
 protocol EditorCoordinating: AnyObject {
@@ -47,6 +72,7 @@ protocol EditorCoordinating: AnyObject {
     func zoomIn()
     func zoomOut()
     func clearFindHighlight()
+    func clearSelection()
 }
 
 struct EditorView: NSViewRepresentable {
