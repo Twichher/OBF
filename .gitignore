@@ -1,0 +1,19 @@
+# Рабочие заметки и материалы проекта (не часть кода)
+onebigfile.md
+themes/
+фичи/
+bugs/
+
+# Сборка и артефакты
+.build/
+dist/
+build/
+
+# macOS
+.DS_Store
+
+# Swift / Xcode
+.swiftpm/
+DerivedData/
+*.xcodeproj
+xcuserdata/
