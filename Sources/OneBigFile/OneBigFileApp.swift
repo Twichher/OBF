@@ -29,7 +29,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct OneBigFileApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @StateObject private var appState = AppState()
+    @StateObject private var appState: AppState = OneBigFileApp.makeAppState()
+
+    /// UI-test modes that drive the real window (--uitest-open,
+    /// --replay-bug2) swap demo content in and out; they must never touch
+    /// the real document, so they get a throwaway store in /tmp.
+    private static func makeAppState() -> AppState {
+        let args = CommandLine.arguments
+        if args.contains("--uitest-open") || args.contains("--replay-bug2") {
+            return AppState(store: DocumentStore(fileURL: URL(fileURLWithPath: "/tmp/obf_uitest_document.md")))
+        }
+        return AppState()
+    }
 
     var body: some Scene {
         Window("One Big File", id: "main") {

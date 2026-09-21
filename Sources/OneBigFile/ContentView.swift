@@ -87,12 +87,267 @@ private final class SidebarGestureBox {
     var recognizer = HorizontalSwipeRecognizer()
 }
 
+/// One task block: creation date, a clickable two-line header (line 1:
+/// H1 with a Roman "I", bold; line 2: H2 with a Roman "II"; a missing
+/// level leaves its line blank) that jumps to the task in the document,
+/// and the task text in a bordered box with a chevron that smoothly
+/// expands it. Collapsed cards all have the same fixed layout: two lines
+/// reserved for the header and two for the task text, long values are
+/// tail-truncated on their own line. Tapping the text (or the chevron)
+/// expands it — up to eight lines; longer texts scroll inside the box.
+/// While the task is being typed in the editor, the card gently wiggles
+/// and shows a steady "Печатаем задание" placeholder instead of rewriting
+/// the text on every debounced refresh.
+struct TaskCardView: View {
+    @EnvironmentObject private var appState: AppState
+    let task: SidebarTaskItem
+    let typing: Bool
+    let expanded: Bool
+    let toggleExpanded: () -> Void
+
+    /// Expanded text is capped at this many lines; longer texts scroll.
+    static let maxExpandedLines = 8
+
+    var body: some View {
+        // The wiggle is driven by wall-clock time rather than a repeating
+        // animation: a repeatForever animation started while typing gets
+        // stuck on the card when the typing flag flips mid-oscillation.
+        if typing {
+            TimelineView(.periodic(from: .now, by: 1.0 / 30.0)) { context in
+                cardContent
+                    .rotationEffect(.degrees(sin(context.date.timeIntervalSinceReferenceDate * 9) * 1.4))
+            }
+        } else {
+            cardContent
+        }
+    }
+
+    private var cardContent: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(Self.displayDate(task.created))
+                .font(.custom(OBFTheme.fontName, size: 12))
+                .foregroundColor(.secondary)
+
+            Button {
+                appState.editor?.scrollToTask(task)
+            } label: {
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(task.h1.map { "I \($0)" } ?? (task.h2 == nil ? "Без заголовков" : " "))
+                        .font(task.h1 != nil
+                              ? Font.custom(OBFTheme.fontName, size: 13).bold()
+                              : Font.custom(OBFTheme.fontName, size: 13))
+                        .foregroundColor(task.h1 != nil ? OBFTheme.text : .secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Text(task.h2.map { "II \($0)" } ?? " ")
+                        .font(.custom(OBFTheme.fontName, size: 13))
+                        .foregroundColor(OBFTheme.text)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                .frame(maxWidth: .infinity,
+                       minHeight: Self.lineHeight(13) * 2, maxHeight: Self.lineHeight(13) * 2,
+                       alignment: .topLeading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            HStack(alignment: .top, spacing: 8) {
+                Group {
+                    if expanded {
+                        TrappedTaskTextView(
+                            text: displayedText,
+                            placeholderStyle: typing || task.text.isEmpty,
+                            onTap: toggleExpanded)
+                            .frame(height: expandedHeight)
+                    } else {
+                        textContent
+                            .lineLimit(2)
+                            .frame(height: Self.lineHeight(14) * 2, alignment: .topLeading)
+                            .contentShape(Rectangle())
+                            .onTapGesture(perform: toggleExpanded)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+
+                Button(action: toggleExpanded) {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 12, weight: .light))
+                        .foregroundColor(OBFTheme.text)
+                        .rotationEffect(.degrees(expanded ? 180 : 0))
+                        .frame(width: 20, height: 20)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(8)
+            .background(OBFTheme.bg)
+            .cornerRadius(8)
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(OBFTheme.border, lineWidth: 1)
+            )
+        }
+        .padding(10)
+        .background(OBFTheme.elevated)
+        .cornerRadius(10)
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(OBFTheme.border, lineWidth: 1)
+        )
+        .opacity(task.done ? 0.5 : 1)
+    }
+
+    private var displayedText: String {
+        typing ? "Печатаем задание" : (task.text.isEmpty ? "Новое задание" : task.text)
+    }
+
+    private var textContent: some View {
+        Text(displayedText)
+            .font(.custom(OBFTheme.fontName, size: 14))
+            .italic(typing)
+            .foregroundColor(typing || task.text.isEmpty ? .secondary : OBFTheme.text)
+            .truncationMode(.tail)
+            .multilineTextAlignment(.leading)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    /// Full text height clamped between the collapsed two-line height and
+    /// the expanded cap; past the cap the box scrolls.
+    private var expandedHeight: CGFloat {
+        Self.expandedHeight(for: displayedText)
+    }
+
+    static func expandedHeight(for text: String) -> CGFloat {
+        let line = lineHeight(14)
+        let full = fullTextHeight(text)
+        return max(line * 2, min(full, line * CGFloat(maxExpandedLines)))
+    }
+
+    /// Width of the task-text column: the fixed sidebar width minus the
+    /// list padding, the card padding, the text-box padding and the
+    /// chevron column.
+    private static var textColumnWidth: CGFloat {
+        OBFTheme.sidebarWidth - 2 * 14 - 2 * 10 - 2 * 8 - 8 - 20
+    }
+
+    private static func fullTextHeight(_ text: String) -> CGFloat {
+        let font = OBFTheme.font(size: 14, bold: false)
+        let rect = (text as NSString).boundingRect(
+            with: NSSize(width: textColumnWidth, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: font])
+        return ceil(rect.height)
+    }
+
+    /// Height of one line of the app font at `size`, so cards reserve
+    /// space for lines even when the value fits on fewer.
+    private static func lineHeight(_ size: CGFloat) -> CGFloat {
+        let font = OBFTheme.font(size: size, bold: false)
+        return ceil(font.ascender - font.descender + font.leading)
+    }
+
+    /// "yyyy-MM-dd" -> "dd-MM-yyyy"; a single space for dateless tasks so
+    /// every card keeps the same height.
+    private static func displayDate(_ raw: String?) -> String {
+        guard let raw else { return " " }
+        let parts = raw.split(separator: "-")
+        guard parts.count == 3 else { return raw }
+        return "\(parts[2])-\(parts[1])-\(parts[0])"
+    }
+}
+
+/// An NSScrollView that consumes scroll-wheel events at its edges instead
+/// of forwarding them up the responder chain: while the pointer rests on
+/// an expanded task text, the sidebar's own scroll view must never start
+/// scrolling when the text can no longer move in the requested direction.
+final class TrappedScrollView: NSScrollView {
+    override func scrollWheel(with event: NSEvent) {
+        let delta = event.scrollingDeltaY
+        guard delta != 0 else { return }
+        let offset = contentView.bounds.origin.y
+        let maxOffset = max(0, (documentView?.frame.height ?? 0) - contentView.bounds.height)
+        let towardBottom = event.isDirectionInvertedFromDevice ? delta > 0 : delta < 0
+        let canScroll = towardBottom ? offset < maxOffset - 0.5 : offset > 0.5
+        if canScroll {
+            super.scrollWheel(with: event)
+        }
+        // At the edge the event is eaten — never forwarded, so the sidebar
+        // stays put.
+    }
+}
+
+/// Top-left origin, so scroll offset 0 is the text's first line.
+final class FlippedTextView: NSTextView {
+    override var isFlipped: Bool { true }
+}
+
+/// Expanded task text in a scrollable AppKit box (see TrappedScrollView).
+/// Clicking the text collapses the card.
+private struct TrappedTaskTextView: NSViewRepresentable {
+    let text: String
+    /// Italic secondary style of the "Печатаем задание" placeholder.
+    let placeholderStyle: Bool
+    let onTap: () -> Void
+
+    final class ClickTarget: NSObject {
+        var onTap: () -> Void = {}
+        @objc func handleClick() { onTap() }
+    }
+
+    func makeCoordinator() -> ClickTarget { ClickTarget() }
+
+    func makeNSView(context: Context) -> TrappedScrollView {
+        let scrollView = TrappedScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
+
+        let textView = FlippedTextView()
+        textView.isEditable = false
+        textView.isSelectable = false
+        textView.drawsBackground = false
+        textView.textContainerInset = .zero
+        textView.minSize = .zero
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
+                                  height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.lineFragmentPadding = 0
+        scrollView.documentView = textView
+
+        let click = NSClickGestureRecognizer(
+            target: context.coordinator, action: #selector(ClickTarget.handleClick))
+        scrollView.addGestureRecognizer(click)
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: TrappedScrollView, context: Context) {
+        context.coordinator.onTap = onTap
+        guard let textView = scrollView.documentView as? FlippedTextView else { return }
+        if textView.string != text {
+            textView.string = text
+        }
+        let base = OBFTheme.font(size: 14, bold: false)
+        textView.font = placeholderStyle
+            ? NSFontManager.shared.convert(base, toHaveTrait: .italicFontMask)
+            : base
+        textView.textColor = placeholderStyle ? .secondaryLabelColor : OBFTheme.textNS
+    }
+}
+
 struct SidebarView: View {
     @EnvironmentObject private var appState: AppState
     @State private var hoveringTitle = false
     @State private var hoveringList = false
     @State private var gestureBox = SidebarGestureBox()
     @State private var scrollMonitor: Any?
+    /// The one task card whose full text is currently expanded; expanding
+    /// another card collapses this one.
+    @State private var expandedTaskID: Int?
 
     private var tabListVisible: Bool { hoveringTitle || hoveringList }
 
@@ -123,6 +378,8 @@ struct SidebarView: View {
         switch appState.sidebarTab {
         case .structure where !appState.outline.isEmpty:
             outlineContent
+        case .tasks:
+            tasksContent
         default:
             emptyPlaceholder
         }
@@ -159,6 +416,56 @@ struct SidebarView: View {
             .animation(.easeInOut(duration: 0.18), value: appState.outline)
             .padding(14)
         }
+    }
+
+    // MARK: - Tasks tab
+
+    private var tasksContent: some View {
+        // The ScrollView stays in the hierarchy even when empty, so the
+        // very first card gets the same insertion animation as later ones;
+        // the placeholder floats above the empty list and fades in/out.
+        ZStack {
+            ScrollView {
+                // A single VStack (not lazy) over one ForEach keyed by the
+                // tasks' stable uids: appearing cards fade in with a slight
+                // scale-and-drop, a done-toggle animates the card's springy
+                // move to the other section, removed cards fade and shrink.
+                VStack(alignment: .leading, spacing: 10) {
+                    let firstDoneID = appState.tasks.first(where: { $0.done })?.id
+                    ForEach(appState.tasks) { task in
+                        if task.done, task.id == firstDoneID {
+                            Text("Выполненные")
+                                .font(.custom(OBFTheme.fontName, size: 13))
+                                .foregroundColor(.secondary)
+                                .padding(.top, 8)
+                                .transition(.opacity)
+                        }
+                        TaskCardView(
+                            task: task,
+                            typing: appState.editingTaskLocation == task.range.location,
+                            expanded: expandedTaskID == task.id,
+                            toggleExpanded: {
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    expandedTaskID = expandedTaskID == task.id ? nil : task.id
+                                }
+                            })
+                            .transition(.asymmetric(
+                                insertion: .opacity
+                                    .combined(with: .scale(scale: 0.9, anchor: .top))
+                                    .combined(with: .offset(y: -10)),
+                                removal: .opacity
+                                    .combined(with: .scale(scale: 0.9, anchor: .top))))
+                    }
+                }
+                .animation(.spring(response: 0.4, dampingFraction: 0.78), value: appState.tasks)
+                .padding(14)
+            }
+            if appState.tasks.isEmpty {
+                emptyPlaceholder
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: appState.tasks.isEmpty)
     }
 
     // MARK: - Bottom tab bar

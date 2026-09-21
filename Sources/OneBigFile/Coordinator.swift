@@ -63,6 +63,14 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
 
     // MARK: - Loading / saving
 
+    /// Creation dates are stored as plain "yyyy-MM-dd" strings so the
+    /// markdown comment stays human-readable and timezone-free.
+    private static func todayString() -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: Date())
+    }
+
     func loadDocument() {
         guard let textView, let storage = textView.textStorage else { return }
         isLoading = true
@@ -97,7 +105,11 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
                     line = String(line.dropFirst())
                 }
                 let marker = task == 2 ? "- [x]" : "- [ ]"
-                line = line.isEmpty ? marker : marker + " " + line
+                var prefix = marker
+                if let created = storage.attribute(.obfTaskCreated, at: content.location, effectiveRange: nil) as? String {
+                    prefix += " <!-- \(created) -->"
+                }
+                line = line.isEmpty ? prefix : prefix + " " + line
             } else if content.length > 0,
                let level = storage.attribute(.obfHeadingLevel, at: content.location, effectiveRange: nil) as? Int {
                 if level == 1 {
@@ -119,7 +131,7 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
                 // The checkbox is a single attachment character at the
                 // paragraph start; the gap after it is transparent padding
                 // inside the attachment image itself.
-                let attributes = styleAttributes(for: nil, task: task)
+                let attributes = styleAttributes(for: nil, task: task, created: line.created)
                 var attachmentAttributes = attributes
                 attachmentAttributes[.attachment] = checkboxAttachment(done: task == 2)
                 result.append(NSAttributedString(string: "\u{FFFC}", attributes: attachmentAttributes))
@@ -134,12 +146,13 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
         return result
     }
 
-    private func parseLines(_ markdown: String) -> [(text: String, level: Int?, task: Int?)] {
-        var lines: [(String, Int?, Int?)] = []
+    private func parseLines(_ markdown: String) -> [(text: String, level: Int?, task: Int?, created: String?)] {
+        var lines: [(String, Int?, Int?, String?)] = []
         (markdown as NSString).enumerateLines { rawLine, _ in
             var line = rawLine
             var level: Int? = nil
             var task: Int? = nil
+            var created: String? = nil
             if line == "#" {
                 level = 1
                 line = ""
@@ -162,7 +175,22 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
                 task = 2
                 line = String(line.dropFirst(6))
             }
-            lines.append((line, level, task))
+            if task != nil, line.hasPrefix("<!--"),
+               let close = line.range(of: "-->") {
+                // Creation date metadata: "- [ ] <!-- 2026-09-21 --> Текст".
+                // The comment round-trips through save/load but is never
+                // rendered in the editor.
+                let raw = line[line.index(line.startIndex, offsetBy: 4)..<close.lowerBound]
+                    .trimmingCharacters(in: .whitespaces)
+                if !raw.isEmpty {
+                    created = raw
+                }
+                line = String(line[close.upperBound...])
+                if line.hasPrefix(" ") {
+                    line = String(line.dropFirst())
+                }
+            }
+            lines.append((line, level, task, created))
         }
         return lines
     }
@@ -217,7 +245,7 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
         return attachment
     }
 
-    func styleAttributes(for level: Int?, task: Int? = nil) -> [NSAttributedString.Key: Any] {
+    func styleAttributes(for level: Int?, task: Int? = nil, created: String? = nil) -> [NSAttributedString.Key: Any] {
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byWordWrapping
         var attributes: [NSAttributedString.Key: Any] = [
@@ -246,6 +274,9 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
             paragraph.paragraphSpacingBefore = 6
             paragraph.paragraphSpacing = 6
             attributes[.obfTaskState] = task
+            if let created {
+                attributes[.obfTaskCreated] = created
+            }
             if task == 2 {
                 attributes[.foregroundColor] = OBFTheme.textNS.withAlphaComponent(0.45)
             }
@@ -275,9 +306,11 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
             let content = self.contentRange(of: enclosing)
             var level: Int? = nil
             var task: Int? = nil
+            var created: String? = nil
             if content.length > 0 {
                 level = storage.attribute(.obfHeadingLevel, at: content.location, effectiveRange: nil) as? Int
                 task = storage.attribute(.obfTaskState, at: content.location, effectiveRange: nil) as? Int
+                created = storage.attribute(.obfTaskCreated, at: content.location, effectiveRange: nil) as? String
             }
             if task != nil, content.length > 0 {
                 if ns.character(at: content.location) == 0xFFFC {
@@ -292,11 +325,13 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
                     // task (the character was deleted): heal by dropping
                     // the marker, restyling the paragraph as body text.
                     storage.removeAttribute(.obfTaskState, range: enclosing)
+                    storage.removeAttribute(.obfTaskCreated, range: enclosing)
                     task = nil
+                    created = nil
                 }
             }
             if content.length > 0 {
-                storage.setAttributes(self.styleAttributes(for: level, task: task), range: content)
+                storage.setAttributes(self.styleAttributes(for: level, task: task, created: created), range: content)
                 if let task {
                     // setAttributes above wipes the attachment attribute;
                     // put the checkbox image back, sized to the current font.
@@ -389,6 +424,7 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
                 // so it never visibly disappears after an edit.
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
+                    self.updateTypingHint()
                     self.applyStyles(in: affected)
                     self.syncTypingAttributes()
                     if self.appState.findVisible {
@@ -406,6 +442,26 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
         scheduleRefresh()
     }
 
+    /// After a character edit, marks the task under the caret as "being
+    /// typed" (its sidebar card wiggles and shows a placeholder) — or
+    /// clears the mark when the caret is anywhere else. Runs one turn
+    /// after the edit, when the selection has settled: this keeps Enter
+    /// pressed inside a task from marking the OLD task, since the caret
+    /// has already moved to the new plain line.
+    private func updateTypingHint() {
+        guard let textView, let storage = textView.textStorage, storage.length > 0 else { return }
+        let paragraph = paragraphRange(at: textView.selectedRange().location)
+        let content = contentRange(of: paragraph)
+        var location: Int? = nil
+        if content.length > 0,
+           storage.attribute(.obfTaskState, at: content.location, effectiveRange: nil) != nil {
+            location = paragraph.location
+        }
+        if appState.editingTaskLocation != location {
+            appState.editingTaskLocation = location
+        }
+    }
+
     private func scheduleRefresh() {
         pendingRefresh?.cancel()
         let work = DispatchWorkItem { [weak self] in
@@ -417,6 +473,7 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
 
     private func refreshNow() {
         rebuildOutline()
+        appState.editingTaskLocation = nil
         if appState.findVisible {
             // No scrolling here: this fires 0.5 s after the last edit, when
             // the user may already have scrolled away from the match.
@@ -432,26 +489,70 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
         let ns = storage.string as NSString
         guard ns.length > 0 else {
             appState.outline = []
+            appState.updateTasks([])
             return
         }
         var items: [OutlineItem] = []
+        var tasks: [SidebarTaskItem] = []
+        var currentH1: String?
+        var currentH2: String?
         ns.enumerateSubstrings(in: NSRange(location: 0, length: ns.length), options: .byParagraphs) { substring, _, enclosing, _ in
             guard enclosing.length > 0 else { return }
             let content = self.contentRange(of: enclosing)
-            guard content.length > 0,
-                  let level = storage.attribute(.obfHeadingLevel, at: content.location, effectiveRange: nil) as? Int else { return }
-            items.append(OutlineItem(title: substring ?? "", level: level, range: enclosing))
+            guard content.length > 0 else { return }
+            if let level = storage.attribute(.obfHeadingLevel, at: content.location, effectiveRange: nil) as? Int {
+                let title = substring ?? ""
+                items.append(OutlineItem(title: title, level: level, range: enclosing))
+                // Headings above a task become its header in the
+                // "Задания" tab; a new H1 resets the H2 below it.
+                if level == 1 {
+                    currentH1 = title
+                    currentH2 = nil
+                } else {
+                    currentH2 = title
+                }
+                return
+            }
+            guard let state = storage.attribute(.obfTaskState, at: content.location, effectiveRange: nil) as? Int else { return }
+            var text = substring ?? ""
+            if text.hasPrefix("\u{FFFC}") {
+                text = String(text.dropFirst())
+            }
+            let created = storage.attribute(.obfTaskCreated, at: content.location, effectiveRange: nil) as? String
+            let h1 = currentH1.flatMap { $0.isEmpty ? nil : $0 }
+            let h2 = currentH2.flatMap { $0.isEmpty ? nil : $0 }
+            // The uid is provisional; AppState.updateTasks assigns the
+            // stable identity used for sidebar animations.
+            tasks.append(SidebarTaskItem(uid: 0, text: text, done: state == 2, created: created, h1: h1, h2: h2, range: enclosing))
+        }
+        // Newest first inside each group; tasks without a recorded date
+        // sink to the bottom of their group.
+        let newestFirst: (SidebarTaskItem, SidebarTaskItem) -> Bool = { lhs, rhs in
+            let l = lhs.created ?? ""
+            let r = rhs.created ?? ""
+            if l != r { return l > r }
+            return lhs.range.location > rhs.range.location
         }
         appState.outline = items
+        appState.updateTasks(tasks.filter { !$0.done }.sorted(by: newestFirst)
+            + tasks.filter { $0.done }.sorted(by: newestFirst))
+    }
+
+    func scrollToTask(_ item: SidebarTaskItem) {
+        scrollTo(location: item.range.location)
     }
 
     func scrollToOutline(_ item: OutlineItem) {
+        scrollTo(location: item.range.location)
+    }
+
+    private func scrollTo(location: Int) {
         guard let textView,
               let storage = textView.textStorage,
               let layoutManager = textView.layoutManager,
               let container = textView.textContainer,
               storage.length > 0 else { return }
-        let location = min(item.range.location, storage.length - 1)
+        let location = min(location, storage.length - 1)
         textView.setSelectedRange(NSRange(location: location, length: 0))
         layoutManager.ensureLayout(for: container)
         let glyphIndex = layoutManager.glyphIndexForCharacter(at: location)
@@ -581,8 +682,13 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
                         .obfTaskState,
                         range: NSRange(location: paragraph.location, length: max(paragraph.length - 1, 0))
                     )
+                    storage.removeAttribute(
+                        .obfTaskCreated,
+                        range: NSRange(location: paragraph.location, length: max(paragraph.length - 1, 0))
+                    )
                 } else {
                     storage.removeAttribute(.obfTaskState, range: paragraph)
+                    storage.removeAttribute(.obfTaskCreated, range: paragraph)
                 }
                 if paragraph.location <= selection.location {
                     caretDelta -= 1
@@ -592,12 +698,17 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
                     storage.removeAttribute(.obfHeadingLevel, range: paragraph)
                 }
                 storage.insert(
-                    NSAttributedString(string: "\u{FFFC}", attributes: styleAttributes(for: nil, task: 1)),
+                    NSAttributedString(string: "\u{FFFC}", attributes: styleAttributes(for: nil, task: 1, created: Self.todayString())),
                     at: paragraph.location
                 )
                 storage.addAttribute(
                     .obfTaskState,
                     value: 1,
+                    range: NSRange(location: paragraph.location, length: content.length + 1)
+                )
+                storage.addAttribute(
+                    .obfTaskCreated,
+                    value: Self.todayString(),
                     range: NSRange(location: paragraph.location, length: content.length + 1)
                 )
                 if paragraph.location <= selection.location {
@@ -658,6 +769,7 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
         storage.deleteCharacters(in: NSRange(location: content.location, length: 1))
         let updated = paragraphRange(at: content.location)
         storage.removeAttribute(.obfTaskState, range: updated)
+        storage.removeAttribute(.obfTaskCreated, range: updated)
         textView.setSelectedRange(NSRange(location: content.location, length: 0))
         applyStyles(in: updated)
         syncTypingAttributes()
@@ -711,6 +823,7 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
                 storage.deleteCharacters(in: NSRange(location: start, length: 1))
                 let updated = paragraphRange(at: start)
                 storage.removeAttribute(.obfTaskState, range: updated)
+                storage.removeAttribute(.obfTaskCreated, range: updated)
                 textView.setSelectedRange(NSRange(location: start, length: 0))
                 applyStyles(in: updated)
                 syncTypingAttributes()
@@ -720,6 +833,7 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
             textView.insertText("\n", replacementRange: selection)
             let tail = paragraphRange(at: selection.location + 1)
             storage.removeAttribute(.obfTaskState, range: tail)
+            storage.removeAttribute(.obfTaskCreated, range: tail)
             textView.setSelectedRange(NSRange(location: selection.location + 1, length: 0))
             textView.typingAttributes = styleAttributes(for: nil)
             return true

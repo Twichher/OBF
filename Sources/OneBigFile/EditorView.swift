@@ -6,6 +6,10 @@ extension NSAttributedString.Key {
     /// 1 = task (todo), 2 = done. Set on paragraph content only, like
     /// obfHeadingLevel; the trailing newline never carries it.
     static let obfTaskState = NSAttributedString.Key("OBFTaskState")
+    /// Creation date of a task, "yyyy-MM-dd". Serialized into the markdown
+    /// as an HTML comment right after the task marker; never shown in the
+    /// editor itself, only in the sidebar's task list.
+    static let obfTaskCreated = NSAttributedString.Key("OBFTaskCreated")
 }
 
 enum OBFCommand {
@@ -81,6 +85,7 @@ protocol EditorCoordinating: AnyObject {
     func toggleTask()
     func toggleTaskDone()
     func scrollToOutline(_ item: OutlineItem)
+    func scrollToTask(_ item: SidebarTaskItem)
     func updateFindMatches()
     func findNext()
     func findPrev()

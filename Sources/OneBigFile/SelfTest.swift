@@ -50,6 +50,21 @@ enum SelfTest {
         print("== N: task text wraps with hanging indent aligned after the checkbox ==")
         if !scenarioN() { failures += 1 }
 
+        print("== O: sidebar task list — dates, order, location paths, round-trip ==")
+        if !scenarioO() { failures += 1 }
+
+        print("== P: sidebar task uids survive edits above and done-toggle ==")
+        if !scenarioP() { failures += 1 }
+
+        print("== Q: expanded task text height is capped (scrolls past 8 lines) ==")
+        if !scenarioQ() { failures += 1 }
+
+        print("== R: Enter from a task clears the typing mark; only the new task is marked ==")
+        if !scenarioR() { failures += 1 }
+
+        print("== S: expanded task text eats scroll events at its edges ==")
+        if !scenarioS() { failures += 1 }
+
         print(failures == 0 ? "SELFTEST OK" : "SELFTEST FAILED (\(failures))")
         return failures == 0 ? 0 : 1
     }
@@ -87,6 +102,12 @@ enum SelfTest {
 
     private static func type(_ textView: OBFTextView, _ text: String) {
         textView.insertText(text, replacementRange: textView.selectedRange())
+    }
+
+    private static func todayString() -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: Date())
     }
 
     /// Lets deferred main-queue work (typing-attribute sync, restyling)
@@ -507,27 +528,69 @@ enum SelfTest {
                             if let restore {
                                 CGWarpMouseCursorPosition(restore)
                             }
-                            // Visual check of task rendering: swap in a demo
-                            // document, snap, then restore the original
-                            // before the debounced save can fire.
+                            // Visual check of task rendering and the
+                            // "Задания" tab: swap in a demo document, wait
+                            // for the debounced refresh that rebuilds the
+                            // sidebar lists, snap, then restore the original
+                            // and save it back immediately.
                             guard let storage = textView.textStorage else { exit(1) }
                             let original = storage.string
                             storage.setAttributedString(coordinator.render(markdown: """
+                                # Проект OneBigFile
+                                ## Раздел первый
                                 Обычный текст перед заданием
-                                - [ ] Купить молоко и хлеб
-                                - [x] Сдать лабораторную работу
-                                - [ ] Очень длинное задание, которое точно не влезет в одну строку редактора и должно перенестись на следующую строку с отступом
+                                - [ ] <!-- 2026-09-20 --> Купить молоко и хлеб
+                                - [x] <!-- 2026-09-19 --> Сдать лабораторную работу
+                                - [ ] <!-- 2026-09-21 --> Очень длинное задание, которое точно не влезет в одну строку редактора и должно перенестись на следующую строку с отступом
                                 Обычный текст после задания
                                 """))
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                            // Mid-animation snapshot (~0.2 s after the
+                            // debounced refresh starts the insertion
+                            // transition), then the settled state.
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
+                                snap(window, "4a_tasks_animating")
+                            }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                                 snap(window, "4_tasks")
-                                storage.setAttributedString(coordinator.render(markdown: original))
-                                sv.contentView.scroll(to: NSPoint(x: 0, y: 120))
-                                sv.reflectScrolledClipView(sv.contentView)
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                                    measure("after-scroll")
-                                    _ = content
-                                    exit(0)
+                                // Typing in a task: its card switches to
+                                // the wiggling "Печатаем задание" state.
+                                if let firstTask = appState.tasks.first {
+                                    textView.setSelectedRange(NSRange(location: firstTask.range.location + 1, length: 0))
+                                    textView.insertText("…", replacementRange: textView.selectedRange())
+                                }
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                                    snap(window, "5_typing_task")
+                                    // Bug repro: Enter from inside the
+                                    // task, Cmd+3 on the new line, type —
+                                    // only the NEW card may wiggle.
+                                    if let firstTask = appState.tasks.first {
+                                        textView.setSelectedRange(NSRange(location: NSMaxRange(firstTask.range) - 1, length: 0))
+                                    }
+                                    textView.insertNewline(nil)
+                                    coordinator.toggleTask()
+                                    textView.insertText("абв", replacementRange: textView.selectedRange())
+                                    // Let the debounced refresh create
+                                    // the new card, then keep typing so
+                                    // the snapshot catches it wiggling
+                                    // while the old card stays still.
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
+                                        textView.insertText("г", replacementRange: textView.selectedRange())
+                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                            snap(window, "6_enter_cmd3_typing")
+                                            storage.setAttributedString(coordinator.render(markdown: original))
+                                            // The demo refresh saved the
+                                            // demo to disk; write the
+                                            // original back right now.
+                                            coordinator.saveNow()
+                                            sv.contentView.scroll(to: NSPoint(x: 0, y: 120))
+                                            sv.reflectScrolledClipView(sv.contentView)
+                                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                                                measure("after-scroll")
+                                                _ = content
+                                                exit(0)
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -582,7 +645,8 @@ enum SelfTest {
 
         let markers = paragraphMarkers(storage)
         let serialized = coordinator.serialize(storage: storage)
-        let expected = "- [ ] текст задания\nобычный текст"
+        // Tasks created via Cmd+3 carry today's date as a hidden comment.
+        let expected = "- [ ] <!-- \(Self.todayString()) --> текст задания\nобычный текст"
         print("    checkbox=\(checkboxThere) markers=\(markers) serialized=\(serialized.debugDescription)")
         let ok = checkboxThere && markers == ["task", "body"] && serialized == expected
         print("    -> OK: \(ok)")
@@ -609,7 +673,7 @@ enum SelfTest {
         let backToTodo = storage.attribute(.obfTaskState, at: 0, effectiveRange: nil) as? Int == 1
 
         print("    done=\(markedDone) dimmed=\(dimmed) serialized=\(serialized.debugDescription) backToTodo=\(backToTodo)")
-        let ok = markedDone && dimmed && serialized == "- [x] сделать дело" && backToTodo
+        let ok = markedDone && dimmed && serialized == "- [x] <!-- \(Self.todayString()) --> сделать дело" && backToTodo
         print("    -> OK: \(ok)")
         return ok
     }
@@ -674,6 +738,239 @@ enum SelfTest {
         let ok = lineStarts.count > 1
             && abs(lineStarts[0] - padding) < 0.5
             && lineStarts.dropFirst().allSatisfy { abs($0 - padding - indent) < 0.5 }
+        print("    -> OK: \(ok)")
+        return ok
+    }
+
+    /// The "Задания" sidebar tab: dated tasks round-trip through markdown
+    /// with their hidden comment, the list is grouped active-then-done with
+    /// the newest on top of each group, and a task knows the headings above
+    /// it. A task created via Cmd+3 gets today's date.
+    private static func scenarioO() -> Bool {
+        let (appState, _, coordinator, storage) = makeStack()
+
+        let markdown = """
+        # Проект
+        ## Первая часть
+        - [ ] <!-- 2026-09-20 --> старое задание
+        - [ ] <!-- 2026-09-21 --> новое задание
+        - [x] <!-- 2026-09-19 --> выполненное задание
+        ## Вторая часть
+        - [ ] задание без даты
+        """
+        storage.setAttributedString(coordinator.render(markdown: markdown))
+        // Save + reload: rebuilds the sidebar data from a fresh render.
+        coordinator.saveNow()
+        coordinator.loadDocument()
+
+        let roundTrip = coordinator.serialize(storage: storage) == markdown
+        let tasks = appState.tasks
+        for task in tasks {
+            print("    task text=\(task.text.debugDescription) done=\(task.done) created=\(task.created ?? "nil") h1=\(task.h1 ?? "nil") h2=\(task.h2 ?? "nil")")
+        }
+
+        let countOk = tasks.count == 4
+        // Active newest-first, then done newest-first; dateless tasks sink
+        // to the bottom of their group.
+        let orderOk = countOk
+            && tasks.map(\.text) == ["новое задание", "старое задание", "задание без даты", "выполненное задание"]
+            && tasks[3].done
+        let datesOk = countOk
+            && tasks[0].created == "2026-09-21"
+            && tasks[1].created == "2026-09-20"
+            && tasks[2].created == nil
+            && tasks[3].created == "2026-09-19"
+        let pathsOk = countOk
+            && tasks[0].h1 == "Проект" && tasks[0].h2 == "Первая часть"
+            && tasks[2].h1 == "Проект" && tasks[2].h2 == "Вторая часть"
+
+        // A fresh Cmd+3 task gets today's date, serialized as a comment.
+        let (_, textView2, coordinator2, storage2) = makeStack()
+        type(textView2, "свежее задание")
+        coordinator2.toggleTask()
+        pump()
+        let created = storage2.attribute(.obfTaskCreated, at: 0, effectiveRange: nil) as? String
+        let serialized2 = coordinator2.serialize(storage: storage2)
+        let todayOk = created == Self.todayString()
+            && serialized2 == "- [ ] <!-- \(Self.todayString()) --> свежее задание"
+
+        print("    roundTrip=\(roundTrip) order=\(orderOk) dates=\(datesOk) paths=\(pathsOk) today=\(todayOk)")
+        let ok = roundTrip && orderOk && datesOk && pathsOk && todayOk
+        print("    -> OK: \(ok)")
+        return ok
+    }
+
+    /// Sidebar card identity (uid) survives edits above the task and a
+    /// done-toggle: only position/state change, so the sidebar animates the
+    /// existing card instead of re-creating it.
+    private static func scenarioP() -> Bool {
+        let (appState, textView, coordinator, storage) = makeStack()
+
+        storage.setAttributedString(coordinator.render(markdown: """
+        # Проект
+        текст
+        - [ ] <!-- 2026-09-20 --> первое
+        - [ ] <!-- 2026-09-21 --> второе
+        """))
+        coordinator.saveNow()
+        coordinator.loadDocument()
+
+        let before = appState.tasks
+        let countOk = before.count == 2
+
+        // An edit in the body line above the tasks shifts their ranges by
+        // 3 without touching headings or task content; identities must not
+        // change, otherwise the sidebar would re-animate both cards.
+        let bodyLine = "# Проект".count + 1
+        textView.setSelectedRange(NSRange(location: bodyLine, length: 0))
+        type(textView, "xxx")
+        pump()
+        coordinator.saveNow()
+        coordinator.loadDocument()
+
+        let afterEdit = appState.tasks
+        let uidsStable = countOk && afterEdit.map(\.uid) == before.map(\.uid)
+        let rangesShifted = countOk && afterEdit.count == 2
+            && zip(before, afterEdit).allSatisfy {
+                $1.range.location == $0.range.location + 3
+            }
+
+        // Typing inside a task marks its card as "being typed" and the
+        // card keeps its identity across the rebuild (no re-creation).
+        let typedTask = afterEdit[0]
+        textView.setSelectedRange(NSRange(location: typedTask.range.location + 1, length: 0))
+        type(textView, "yy")
+        pump()
+        let hintOk = appState.editingTaskLocation == typedTask.range.location
+        coordinator.saveNow()
+        coordinator.loadDocument()
+
+        let afterTyping = appState.tasks
+        let typedUidStable = hintOk
+            && afterTyping.first?.uid == typedTask.uid
+            && afterTyping.first?.text == "yyвторое"
+
+        // Cmd+4 flips done: the card keeps its uid and moves to the done
+        // group at the end of the list.
+        let toggledUID = afterTyping.first?.uid
+        if let first = afterTyping.first {
+            textView.setSelectedRange(NSRange(location: first.range.location, length: 0))
+        }
+        coordinator.toggleTaskDone()
+        pump()
+        coordinator.saveNow()
+        coordinator.loadDocument()
+
+        let afterToggle = appState.tasks
+        let moved = toggledUID != nil
+            && afterToggle.count == 2
+            && afterToggle.last?.uid == toggledUID
+            && afterToggle.last?.done == true
+
+        print("    count=\(countOk) uidsStable=\(uidsStable) shifted=\(rangesShifted) hint=\(hintOk) typedUid=\(typedUidStable) moved=\(moved)")
+        let ok = countOk && uidsStable && rangesShifted && typedUidStable && moved
+        print("    -> OK: \(ok)")
+        return ok
+    }
+
+    /// Expanded task text: never shorter than the collapsed two-line box,
+    /// grows with the text, and stops at the eight-line cap — longer texts
+    /// scroll inside the box.
+    private static func scenarioQ() -> Bool {
+        let words = "строка текста задания "
+        let short = TaskCardView.expandedHeight(for: "короткое")
+        let mid = TaskCardView.expandedHeight(for: String(repeating: words, count: 4))
+        let long = TaskCardView.expandedHeight(for: String(repeating: words, count: 40))
+        let longer = TaskCardView.expandedHeight(for: String(repeating: words, count: 80))
+
+        let ok = mid > short && long > mid && longer == long
+        print("    short=\(short) mid=\(mid) long=\(long) longer=\(longer)")
+        print("    -> OK: \(ok)")
+        return ok
+    }
+
+    /// Enter from inside a task moves the caret to a new plain line, so
+    /// the OLD task's card must leave the typing state; after Cmd+3 on the
+    /// new line only the NEW task is marked as being typed.
+    private static func scenarioR() -> Bool {
+        let (appState, textView, coordinator, _) = makeStack()
+
+        coordinator.toggleTask()
+        type(textView, "первое")
+        pump()
+        let typingA = appState.editingTaskLocation == 0
+
+        textView.insertNewline(nil)
+        pump()
+        let clearedAfterEnter = appState.editingTaskLocation == nil
+
+        coordinator.toggleTask()
+        pump()
+        let newLocation = appState.editingTaskLocation
+        let markedNew = newLocation != nil && newLocation != 0
+
+        type(textView, "второе")
+        pump()
+        let staysNew = appState.editingTaskLocation == newLocation
+
+        print("    typingA=\(typingA) clearedAfterEnter=\(clearedAfterEnter) markedNew=\(markedNew) staysNew=\(staysNew)")
+        let ok = typingA && clearedAfterEnter && markedNew && staysNew
+        print("    -> OK: \(ok)")
+        return ok
+    }
+
+    /// The expanded task text box (TrappedScrollView) scrolls its own
+    /// content when it can and consumes the event at its edges — the event
+    /// is never forwarded up the responder chain, so the sidebar's scroll
+    /// view cannot start scrolling while the pointer is inside the box.
+    private static func scenarioS() -> Bool {
+        final class ScrollProbe: NSResponder {
+            var received = 0
+            override func scrollWheel(with event: NSEvent) { received += 1 }
+        }
+
+        let scrollView = TrappedScrollView(frame: NSRect(x: 0, y: 0, width: 168, height: 128))
+        let textView = FlippedTextView(frame: NSRect(x: 0, y: 0, width: 168, height: 500))
+        textView.string = (1...40).map(String.init).joined(separator: "\n")
+        scrollView.documentView = textView
+        scrollView.layoutSubtreeIfNeeded()
+        let probe = ScrollProbe()
+        scrollView.nextResponder = probe
+
+        func wheel(_ dy: Int32) -> NSEvent? {
+            guard let source = CGEventSource(stateID: .hidSystemState),
+                  let cg = CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 1, wheel1: dy, wheel2: 0, wheel3: 0),
+                  let event = NSEvent(cgEvent: cg) else { return nil }
+            return event
+        }
+        guard let positive = wheel(10), let negative = wheel(-10) else {
+            print("    -> OK: false (cannot synthesize scroll events)")
+            return false
+        }
+        // Which sign scrolls toward the bottom depends on the system's
+        // natural-scrolling setting; read it from the event itself.
+        let towardBottom = positive.isDirectionInvertedFromDevice ? positive : negative
+        let towardTop = positive.isDirectionInvertedFromDevice ? negative : positive
+
+        // At the top, a toward-top event is eaten: no movement, no forward.
+        scrollView.scrollWheel(with: towardTop)
+        let stayedAtTop = scrollView.contentView.bounds.origin.y == 0
+        let notForwardedAtTop = probe.received == 0
+
+        // Toward-bottom events scroll the content...
+        for _ in 0..<100 { scrollView.scrollWheel(with: towardBottom) }
+        let bottomOffset = scrollView.contentView.bounds.origin.y
+        let scrolledDown = bottomOffset > 0
+        let notForwardedWhileScrolling = probe.received == 0
+
+        // ...and at the bottom the event is eaten again.
+        scrollView.scrollWheel(with: towardBottom)
+        let stayedAtBottom = scrollView.contentView.bounds.origin.y == bottomOffset
+        let notForwardedAtBottom = probe.received == 0
+
+        print("    stayedAtTop=\(stayedAtTop) scrolledDown=\(scrolledDown) bottom=\(bottomOffset) stayedAtBottom=\(stayedAtBottom) forwarded=\(probe.received)")
+        let ok = stayedAtTop && scrolledDown && stayedAtBottom
+            && notForwardedAtTop && notForwardedWhileScrolling && notForwardedAtBottom
         print("    -> OK: \(ok)")
         return ok
     }
