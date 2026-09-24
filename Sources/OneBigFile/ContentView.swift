@@ -21,13 +21,40 @@ struct ContentView: View {
             SidebarView()
                 .frame(width: OBFTheme.sidebarWidth)
                 .frame(maxHeight: .infinity)
+                .sheet(item: Binding(
+                    get: { appState.routineEditor },
+                    set: { appState.routineEditor = $0 }
+                )) { request in
+                    RoutineEditorView(request: request)
+                        .environmentObject(appState)
+                }
         }
         .padding(OBFTheme.contentPadding)
         .frame(width: OBFTheme.windowWidth, height: OBFTheme.windowHeight)
         .background(OBFTheme.bg)
+        .sheet(isPresented: Binding(
+            get: { appState.modalTaskID != nil },
+            set: { if !$0 { appState.modalTaskID = nil } }
+        )) {
+            TaskModalView()
+                .environmentObject(appState)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .NSCalendarDayChanged).receive(on: RunLoop.main)) { _ in
+            appState.refreshToday()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            appState.refreshToday()
+        }
         .onAppear {
+            RoutineKeys.install(appState: appState)
             if CommandLine.arguments.contains("--replay-bug2") {
                 SelfTest.replayBug2(appState: appState)
+            }
+            if CommandLine.arguments.contains("--uitest-demo") {
+                RoutineDemo.snapshot(appState: appState)
+            }
+            if CommandLine.arguments.contains("--uitest-routine") {
+                SelfTest.snapRoutine(appState: appState)
             }
             if CommandLine.arguments.contains("--uitest-open") {
                 SelfTest.measureOpen(appState: appState)
@@ -154,7 +181,7 @@ struct TaskCardView: View {
 
             HStack(alignment: .top, spacing: 8) {
                 Group {
-                    if expanded {
+                    if expanded && canExpand {
                         TrappedTaskTextView(
                             text: displayedText,
                             placeholderStyle: typing || task.text.isEmpty,
@@ -165,20 +192,22 @@ struct TaskCardView: View {
                             .lineLimit(2)
                             .frame(height: Self.lineHeight(14) * 2, alignment: .topLeading)
                             .contentShape(Rectangle())
-                            .onTapGesture(perform: toggleExpanded)
+                            .onTapGesture { if canExpand { toggleExpanded() } }
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .topLeading)
 
-                Button(action: toggleExpanded) {
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 12, weight: .light))
-                        .foregroundColor(OBFTheme.text)
-                        .rotationEffect(.degrees(expanded ? 180 : 0))
-                        .frame(width: 20, height: 20)
-                        .contentShape(Rectangle())
+                if canExpand {
+                    Button(action: toggleExpanded) {
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 12, weight: .light))
+                            .foregroundColor(OBFTheme.text)
+                            .rotationEffect(.degrees(expanded ? 180 : 0))
+                            .frame(width: 20, height: 20)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
             .padding(8)
             .background(OBFTheme.bg)
@@ -195,7 +224,23 @@ struct TaskCardView: View {
             RoundedRectangle(cornerRadius: 10)
                 .stroke(OBFTheme.border, lineWidth: 1)
         )
+        .overlay(alignment: .topTrailing) {
+            OpenTaskButton { appState.modalTaskID = task.id }
+                .padding(7)
+        }
         .opacity(task.done ? 0.5 : 1)
+    }
+
+    /// Whether the text needs more than the collapsed two lines. Short
+    /// texts get no chevron and do not expand. Measured on the task's own
+    /// text (not the typing placeholder), so the chevron does not flicker
+    /// while the task is being typed.
+    private var canExpand: Bool {
+        Self.needsExpansion(task.text.isEmpty ? "Новое задание" : task.text)
+    }
+
+    static func needsExpansion(_ text: String) -> Bool {
+        fullTextHeight(text) > lineHeight(14) * 2 + 0.5
     }
 
     private var displayedText: String {
@@ -231,10 +276,14 @@ struct TaskCardView: View {
         OBFTheme.sidebarWidth - 2 * 14 - 2 * 10 - 2 * 8 - 8 - 20
     }
 
-    private static func fullTextHeight(_ text: String) -> CGFloat {
-        let font = OBFTheme.font(size: 14, bold: false)
+    static func fullTextHeight(_ text: String) -> CGFloat {
+        textHeight(text, size: 14, width: textColumnWidth)
+    }
+
+    static func textHeight(_ text: String, size: CGFloat, width: CGFloat) -> CGFloat {
+        let font = OBFTheme.font(size: size, bold: false)
         let rect = (text as NSString).boundingRect(
-            with: NSSize(width: textColumnWidth, height: .greatestFiniteMagnitude),
+            with: NSSize(width: width, height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
             attributes: [.font: font])
         return ceil(rect.height)
@@ -242,14 +291,14 @@ struct TaskCardView: View {
 
     /// Height of one line of the app font at `size`, so cards reserve
     /// space for lines even when the value fits on fewer.
-    private static func lineHeight(_ size: CGFloat) -> CGFloat {
+    static func lineHeight(_ size: CGFloat) -> CGFloat {
         let font = OBFTheme.font(size: size, bold: false)
         return ceil(font.ascender - font.descender + font.leading)
     }
 
     /// "yyyy-MM-dd" -> "dd-MM-yyyy"; a single space for dateless tasks so
     /// every card keeps the same height.
-    private static func displayDate(_ raw: String?) -> String {
+    static func displayDate(_ raw: String?) -> String {
         guard let raw else { return " " }
         let parts = raw.split(separator: "-")
         guard parts.count == 3 else { return raw }
@@ -261,19 +310,46 @@ struct TaskCardView: View {
 /// of forwarding them up the responder chain: while the pointer rests on
 /// an expanded task text, the sidebar's own scroll view must never start
 /// scrolling when the text can no longer move in the requested direction.
+/// Scrolling is applied manually (not via super) so the behaviour is
+/// identical for real trackpad events and for synthetic test events.
 final class TrappedScrollView: NSScrollView {
     override func scrollWheel(with event: NSEvent) {
         let delta = event.scrollingDeltaY
         guard delta != 0 else { return }
         let offset = contentView.bounds.origin.y
         let maxOffset = max(0, (documentView?.frame.height ?? 0) - contentView.bounds.height)
-        let towardBottom = event.isDirectionInvertedFromDevice ? delta > 0 : delta < 0
-        let canScroll = towardBottom ? offset < maxOffset - 0.5 : offset > 0.5
-        if canScroll {
-            super.scrollWheel(with: event)
-        }
+        let inverted = event.isDirectionInvertedFromDevice
+        guard Self.shouldScroll(offset: offset, maxOffset: maxOffset,
+                                deltaY: delta, inverted: inverted)
+        else { return }
         // At the edge the event is eaten — never forwarded, so the sidebar
         // stays put.
+        let towardBottom = Self.isTowardBottom(deltaY: delta, inverted: inverted)
+        let newOffset = towardBottom
+            ? min(maxOffset, offset + abs(delta))
+            : max(0, offset - abs(delta))
+        contentView.setBoundsOrigin(NSPoint(x: 0, y: newOffset))
+        reflectScrolledClipView(contentView)
+    }
+
+    /// True when the content can still move in the event's direction.
+    static func shouldScroll(offset: CGFloat, maxOffset: CGFloat, deltaY: CGFloat, inverted: Bool) -> Bool {
+        let towardBottom = isTowardBottom(deltaY: deltaY, inverted: inverted)
+        return towardBottom ? offset < maxOffset - 0.5 : offset > 0.5
+    }
+
+    /// Scroll direction inside the task text is reversed relative to the
+    /// system setting: fingers moving up reveal the text further down.
+    static func isTowardBottom(deltaY: CGFloat, inverted: Bool) -> Bool {
+        inverted ? deltaY < 0 : deltaY > 0
+    }
+
+    /// True when a window point lies over an expanded task text box.
+    static func contains(windowPoint: NSPoint, in root: NSView) -> Bool {
+        if let trap = root as? TrappedScrollView, !trap.isHiddenOrHasHiddenAncestor {
+            return trap.convert(trap.bounds, to: nil).contains(windowPoint)
+        }
+        return root.subviews.contains { contains(windowPoint: windowPoint, in: $0) }
     }
 }
 
@@ -288,7 +364,12 @@ private struct TrappedTaskTextView: NSViewRepresentable {
     let text: String
     /// Italic secondary style of the "Печатаем задание" placeholder.
     let placeholderStyle: Bool
-    let onTap: () -> Void
+    var fontSize: CGFloat = 14
+    var textColor: NSColor = OBFTheme.textNS
+    /// Selectable text is for reading and copying (the task modal); the
+    /// sidebar card instead collapses on click.
+    var selectable = false
+    var onTap: (() -> Void)?
 
     final class ClickTarget: NSObject {
         var onTap: () -> Void = {}
@@ -306,7 +387,8 @@ private struct TrappedTaskTextView: NSViewRepresentable {
 
         let textView = FlippedTextView()
         textView.isEditable = false
-        textView.isSelectable = false
+        textView.isSelectable = selectable
+        textView.selectedTextAttributes = [.backgroundColor: OBFTheme.selectionNS]
         textView.drawsBackground = false
         textView.textContainerInset = .zero
         textView.minSize = .zero
@@ -319,23 +401,214 @@ private struct TrappedTaskTextView: NSViewRepresentable {
         textView.textContainer?.lineFragmentPadding = 0
         scrollView.documentView = textView
 
-        let click = NSClickGestureRecognizer(
-            target: context.coordinator, action: #selector(ClickTarget.handleClick))
-        scrollView.addGestureRecognizer(click)
+        if onTap != nil {
+            let click = NSClickGestureRecognizer(
+                target: context.coordinator, action: #selector(ClickTarget.handleClick))
+            scrollView.addGestureRecognizer(click)
+        }
         return scrollView
     }
 
     func updateNSView(_ scrollView: TrappedScrollView, context: Context) {
-        context.coordinator.onTap = onTap
+        context.coordinator.onTap = onTap ?? {}
         guard let textView = scrollView.documentView as? FlippedTextView else { return }
         if textView.string != text {
             textView.string = text
         }
-        let base = OBFTheme.font(size: 14, bold: false)
+        let base = OBFTheme.font(size: fontSize, bold: false)
         textView.font = placeholderStyle
             ? NSFontManager.shared.convert(base, toHaveTrait: .italicFontMask)
             : base
-        textView.textColor = placeholderStyle ? .secondaryLabelColor : OBFTheme.textNS
+        textView.textColor = placeholderStyle ? .secondaryLabelColor : textColor
+    }
+}
+
+/// Small square button in a task card's top-right corner that opens the
+/// task in the modal.
+private struct OpenTaskButton: View {
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundColor(hovering ? OBFTheme.text : .secondary)
+                .frame(width: 20, height: 20)
+                .background(hovering ? OBFTheme.border : OBFTheme.bg)
+                .cornerRadius(5)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5)
+                        .stroke(OBFTheme.border, lineWidth: 1)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help("Открыть задание целиком")
+    }
+}
+
+/// Full-size view of one task, presented as a sheet over the main window
+/// (so the editor cannot be typed into while it is open; Esc closes it).
+/// Shows the status, creation date, location (H1 / H2) and the whole task
+/// text — selectable, scrolling inside the box when it is very long.
+/// Active and done tasks differ in accent colour, badge and text styling.
+struct TaskModalView: View {
+    @EnvironmentObject private var appState: AppState
+
+    static let width: CGFloat = 600
+    private static let textSize: CGFloat = 16
+    /// Horizontal padding of the sheet and of the text box inside it.
+    private static let padding: CGFloat = 24
+    private static let boxPadding: CGFloat = 14
+    private static let maxTextLines = 18
+
+    var body: some View {
+        Group {
+            if let task = appState.modalTask {
+                content(task)
+            } else {
+                // The task vanished from the document; nothing to show.
+                Color.clear.frame(width: Self.width, height: 1)
+                    .onAppear { appState.modalTaskID = nil }
+            }
+        }
+        .presentationBackground(OBFTheme.elevated)
+        .preferredColorScheme(.dark)
+    }
+
+    private func content(_ task: SidebarTaskItem) -> some View {
+        let accent = task.done ? OBFTheme.done : OBFTheme.h1Text
+        return VStack(alignment: .leading, spacing: 0) {
+            Rectangle()
+                .fill(accent)
+                .frame(height: 4)
+
+            VStack(alignment: .leading, spacing: 18) {
+                HStack(alignment: .center) {
+                    statusBadge(done: task.done, accent: accent)
+                    Spacer()
+                    if let created = task.created {
+                        Label(TaskCardView.displayDate(created), systemImage: "calendar")
+                            .font(.custom(OBFTheme.fontName, size: 13))
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                location(task)
+
+                textBox(task, accent: accent)
+
+                HStack(spacing: 10) {
+                    Spacer()
+                    Button("Закрыть") { appState.modalTaskID = nil }
+                        .keyboardShortcut(.cancelAction)
+                        .buttonStyle(ModalButtonStyle(filled: false, accent: accent))
+                    Button("Перейти к заданию") {
+                        appState.modalTaskID = nil
+                        appState.editor?.scrollToTask(task)
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(ModalButtonStyle(filled: true, accent: accent))
+                }
+            }
+            .padding(Self.padding)
+        }
+        .frame(width: Self.width)
+        .background(OBFTheme.elevated)
+    }
+
+    private func statusBadge(done: Bool, accent: Color) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: done ? "checkmark.circle.fill" : "circle.dashed")
+                .font(.system(size: 12, weight: .semibold))
+            Text(done ? "Выполнено" : "Активное задание")
+                .font(.custom(OBFTheme.fontName, size: 13).bold())
+        }
+        .foregroundColor(accent)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(accent.opacity(0.14))
+        .cornerRadius(6)
+    }
+
+    /// Where the task lives in the document: its H1 and H2 headings, laid
+    /// out like the sidebar card ("I …" / "II …") but untruncated.
+    @ViewBuilder private func location(_ task: SidebarTaskItem) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Расположение")
+                .font(.custom(OBFTheme.fontName, size: 12))
+                .foregroundColor(.secondary)
+            if task.h1 == nil && task.h2 == nil {
+                Text("Без заголовков")
+                    .font(.custom(OBFTheme.fontName, size: 15))
+                    .foregroundColor(.secondary)
+            }
+            if let h1 = task.h1 {
+                Text("I \(h1)")
+                    .font(Font.custom(OBFTheme.fontName, size: 18).bold())
+                    .foregroundColor(OBFTheme.h1Text)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let h2 = task.h2 {
+                Text("II \(h2)")
+                    .font(.custom(OBFTheme.fontName, size: 15))
+                    .foregroundColor(OBFTheme.text)
+                    .padding(.leading, task.h1 == nil ? 0 : 14)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .textSelection(.enabled)
+    }
+
+    private func textBox(_ task: SidebarTaskItem, accent: Color) -> some View {
+        let text = task.text.isEmpty ? "Новое задание" : task.text
+        let width = Self.width - 2 * Self.padding - 2 * Self.boxPadding - 3
+        let line = TaskCardView.lineHeight(Self.textSize)
+        let full = TaskCardView.textHeight(text, size: Self.textSize, width: width)
+        let height = max(line, min(full, line * CGFloat(Self.maxTextLines)))
+        return TrappedTaskTextView(
+            text: text,
+            placeholderStyle: task.text.isEmpty,
+            fontSize: Self.textSize,
+            // Done tasks read as finished: dimmer text on a quiet box.
+            textColor: task.done ? OBFTheme.textNS.withAlphaComponent(0.7) : OBFTheme.textNS,
+            selectable: true)
+            .frame(height: height)
+            .padding(Self.boxPadding)
+            .padding(.leading, 3)
+            .background(OBFTheme.bg)
+            .overlay(alignment: .leading) {
+                // Accent bar on the left edge of the text.
+                Rectangle().fill(accent.opacity(task.done ? 0.5 : 1)).frame(width: 3)
+            }
+            .cornerRadius(8)
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(OBFTheme.border, lineWidth: 1)
+            )
+    }
+}
+
+struct ModalButtonStyle: ButtonStyle {
+    let filled: Bool
+    let accent: Color
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.custom(OBFTheme.fontName, size: 14))
+            .foregroundColor(filled ? OBFTheme.bg : OBFTheme.text)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 7)
+            .background(filled ? accent : OBFTheme.bg)
+            .cornerRadius(7)
+            .overlay(
+                RoundedRectangle(cornerRadius: 7)
+                    .stroke(filled ? Color.clear : OBFTheme.border, lineWidth: 1)
+            )
+            .opacity(configuration.isPressed ? 0.75 : 1)
+            .contentShape(Rectangle())
     }
 }
 
@@ -345,9 +618,6 @@ struct SidebarView: View {
     @State private var hoveringList = false
     @State private var gestureBox = SidebarGestureBox()
     @State private var scrollMonitor: Any?
-    /// The one task card whose full text is currently expanded; expanding
-    /// another card collapses this one.
-    @State private var expandedTaskID: Int?
 
     private var tabListVisible: Bool { hoveringTitle || hoveringList }
 
@@ -380,6 +650,8 @@ struct SidebarView: View {
             outlineContent
         case .tasks:
             tasksContent
+        case .routine:
+            RoutineView()
         default:
             emptyPlaceholder
         }
@@ -431,22 +703,25 @@ struct SidebarView: View {
                 // scale-and-drop, a done-toggle animates the card's springy
                 // move to the other section, removed cards fade and shrink.
                 VStack(alignment: .leading, spacing: 10) {
+                    let firstActiveID = appState.tasks.first(where: { !$0.done })?.id
                     let firstDoneID = appState.tasks.first(where: { $0.done })?.id
+                    let doneCount = appState.tasks.filter(\.done).count
+                    let activeCount = appState.tasks.count - doneCount
                     ForEach(appState.tasks) { task in
+                        if !task.done, task.id == firstActiveID {
+                            sectionHeader("Активные", count: activeCount)
+                        }
                         if task.done, task.id == firstDoneID {
-                            Text("Выполненные")
-                                .font(.custom(OBFTheme.fontName, size: 13))
-                                .foregroundColor(.secondary)
-                                .padding(.top, 8)
-                                .transition(.opacity)
+                            sectionHeader("Выполненные", count: doneCount)
+                                .padding(.top, activeCount > 0 ? 8 : 0)
                         }
                         TaskCardView(
                             task: task,
                             typing: appState.editingTaskLocation == task.range.location,
-                            expanded: expandedTaskID == task.id,
+                            expanded: appState.expandedTaskID == task.id,
                             toggleExpanded: {
                                 withAnimation(.easeInOut(duration: 0.2)) {
-                                    expandedTaskID = expandedTaskID == task.id ? nil : task.id
+                                    appState.expandedTaskID = appState.expandedTaskID == task.id ? nil : task.id
                                 }
                             })
                             .transition(.asymmetric(
@@ -466,6 +741,17 @@ struct SidebarView: View {
             }
         }
         .animation(.easeInOut(duration: 0.2), value: appState.tasks.isEmpty)
+    }
+
+    /// Section title over the active / done task cards with the live
+    /// number of cards in that section, e.g. "Активные (10)".
+    private func sectionHeader(_ title: String, count: Int) -> some View {
+        Text("\(title) (\(count))")
+            .font(.custom(OBFTheme.fontName, size: 13))
+            .foregroundColor(.secondary)
+            .monospacedDigit()
+            .contentTransition(.numericText())
+            .transition(.opacity)
     }
 
     // MARK: - Bottom tab bar
@@ -563,6 +849,8 @@ struct SidebarView: View {
             }
             // Mouse wheels and momentum phases carry no gesture phase.
             guard event.phase != [] else { return event }
+            // Modals are sheet windows; their gestures never switch tabs.
+            guard !appState.anyModalOpen else { return event }
             // Synthetic posted events have no associated window; for them
             // locationInWindow is a screen point. Real gesture events are
             // always window-relative already.
@@ -584,6 +872,12 @@ struct SidebarView: View {
                 height: OBFTheme.windowHeight - OBFTheme.contentPadding * 2
             )
             guard sidebar.contains(location) else { return event }
+            // Over an expanded task text, two-finger gestures only scroll
+            // the text — they never switch tabs.
+            if let root = (event.window ?? NSApp.keyWindow ?? NSApp.windows.first)?.contentView,
+               TrappedScrollView.contains(windowPoint: location, in: root) {
+                return event
+            }
             switch gestureBox.recognizer.handle(
                 phase: event.phase,
                 deltaX: event.scrollingDeltaX,
@@ -654,6 +948,8 @@ struct FindBar: View {
         .onAppear {
             isFocused = true
             keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event -> NSEvent? in
+                // Keys belong to the modal while one is open.
+                guard !appState.anyModalOpen else { return event }
                 if event.keyCode == 53 {
                     appState.closeFind()
                     return nil

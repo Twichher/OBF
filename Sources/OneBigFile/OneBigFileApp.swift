@@ -13,7 +13,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             exit(SelfTest.runUITestBug2())
         }
         if CommandLine.arguments.contains("--replay-bug2")
-            || CommandLine.arguments.contains("--uitest-open") {
+            || CommandLine.arguments.contains("--uitest-open")
+            || CommandLine.arguments.contains("--uitest-routine")
+            || CommandLine.arguments.contains("--demo-routine")
+            || CommandLine.arguments.contains("--uitest-demo") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                 NSApp.activate(ignoringOtherApps: true)
                 NSApp.windows.first?.makeKeyAndOrderFront(nil)
@@ -36,6 +39,16 @@ struct OneBigFileApp: App {
     /// the real document, so they get a throwaway store in /tmp.
     private static func makeAppState() -> AppState {
         let args = CommandLine.arguments
+        if args.contains("--demo-routine") || args.contains("--uitest-demo") {
+            return RoutineDemo.makeAppState()
+        }
+        if args.contains("--uitest-routine") {
+            let routineURL = URL(fileURLWithPath: "/tmp/obf_uitest_routine.json")
+            try? FileManager.default.removeItem(at: routineURL)
+            return AppState(
+                store: DocumentStore(fileURL: URL(fileURLWithPath: "/tmp/obf_uitest_document.md")),
+                routineStore: RoutineStore(fileURL: routineURL))
+        }
         if args.contains("--uitest-open") || args.contains("--replay-bug2") {
             return AppState(store: DocumentStore(fileURL: URL(fileURLWithPath: "/tmp/obf_uitest_document.md")))
         }

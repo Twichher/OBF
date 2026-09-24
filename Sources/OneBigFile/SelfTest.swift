@@ -65,8 +65,328 @@ enum SelfTest {
         print("== S: expanded task text eats scroll events at its edges ==")
         if !scenarioS() { failures += 1 }
 
+        print("== T: short task texts (<= 2 lines) get no expand chevron ==")
+        if !scenarioT() { failures += 1 }
+
+        print("== U: routine — add, done today only, delete + Cmd+Z, persistence ==")
+        if !scenarioU() { failures += 1 }
+
+        print("== V: routine shortcuts — Cmd+R, Cmd+T then 1…7, Delete/Cmd+Z only in routine focus ==")
+        if !scenarioV() { failures += 1 }
+
+        print("== W: routine streaks (demo data), reorder, drag target ==")
+        if !scenarioW() { failures += 1 }
+
         print(failures == 0 ? "SELFTEST OK" : "SELFTEST FAILED (\(failures))")
         return failures == 0 ? 0 : 1
+    }
+
+    private static func makeRoutineState() -> AppState {
+        let url = URL(fileURLWithPath: "/tmp/obf_selftest_routine.json")
+        try? FileManager.default.removeItem(at: url)
+        return AppState(
+            store: DocumentStore(fileURL: URL(fileURLWithPath: "/tmp/obf_selftest_document.md")),
+            routineStore: RoutineStore(fileURL: url))
+    }
+
+    /// Runs the main run loop until `condition` holds (deferred day
+    /// switches land a run-loop pass later) or a second has passed.
+    private static func pump(until condition: () -> Bool) {
+        let deadline = Date().addingTimeInterval(1)
+        while !condition(), Date() < deadline {
+            pump()
+        }
+    }
+
+    private static func key(_ code: UInt16, _ chars: String, _ flags: NSEvent.ModifierFlags = []) -> NSEvent {
+        NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0,
+            windowNumber: 0, context: nil, characters: chars,
+            charactersIgnoringModifiers: chars, isARepeat: false, keyCode: code)!
+    }
+
+    private static func scenarioU() -> Bool {
+        let state = makeRoutineState()
+        var ok = true
+        func check(_ cond: Bool, _ label: String) {
+            if !cond { print("    FAIL: \(label)"); ok = false }
+        }
+        func texts(_ day: Int) -> [String] { state.routine.tasks(on: day).map(\.text) }
+        func task(_ text: String) -> RoutineTask { state.routine.tasks.first { $0.text == text }! }
+        let today = state.todayKey
+
+        state.addRoutineItem("  Подъём в 8 утра \n", days: Array(0..<7))
+        state.addRoutineItem("Зал", days: [0])
+        state.addRoutineItem("Пара", days: [0, 2])
+        state.addRoutineItem("   ", days: [0])
+        state.addRoutineItem("Без дней", days: [])
+        check(texts(0) == ["Подъём в 8 утра", "Зал", "Пара"], "add/trim/order")
+        check(state.routine.tasks.count == 3, "one task per add, empty ignored")
+        check(texts(2) == ["Подъём в 8 утра", "Пара"] && texts(1) == ["Подъём в 8 утра"], "repeat days")
+        check(task("Пара").created == today && task("Пара").schedule == [RoutineScheduleEntry(from: today, days: [0, 2])], "schedule")
+
+        // Done: logged by date, shared by all days of the task, resets next day.
+        state.toggleRoutineDone(task("Зал").id)
+        check(state.isRoutineItemDone(task("Зал")) && task("Зал").done == [today], "done logged")
+        check(state.routineItemsForDisplay(day: 0).map(\.text) == ["Подъём в 8 утра", "Пара", "Зал"], "done sinks")
+        check(texts(0) == ["Подъём в 8 утра", "Зал", "Пара"], "stored order kept")
+        state.toggleRoutineDone(task("Зал").id)
+        check(task("Зал").done.isEmpty, "undone removes date")
+        state.toggleRoutineDone(task("Зал").id)
+
+        // Text edit changes the task everywhere; days edit moves it.
+        state.updateRoutineItem(task("Пара").id, text: "Пара АСОИУ", days: [1, 2])
+        check(texts(0) == ["Подъём в 8 утра", "Зал"] && texts(1) == ["Подъём в 8 утра", "Пара АСОИУ"]
+              && texts(2) == ["Подъём в 8 утра", "Пара АСОИУ"], "edit text + days")
+        check(task("Пара АСОИУ").schedule.count == 1 && task("Пара АСОИУ").schedule[0].days == [1, 2],
+              "same-day schedule changes collapse")
+
+        // Delete from one day only (the shown one); Cmd+Z restores it.
+        state.showRoutine(day: 2)
+        pump(until: { state.routineDay == 2 })
+        let para = task("Пара АСОИУ").id
+        state.selectRoutineItem(para)
+        state.deleteSelectedRoutineItems()
+        check(texts(2) == ["Подъём в 8 утра"] && texts(1).contains("Пара АСОИУ"), "delete from this day only")
+        check(task("Пара АСОИУ").currentDays == [1] && !task("Пара АСОИУ").isDeleted, "still on Tuesday")
+        state.undoRoutineDeletion()
+        pump(until: { state.routineDay == 2 })
+        check(texts(2) == ["Подъём в 8 утра", "Пара АСОИУ"] && task("Пара АСОИУ").currentDays == [1, 2], "undo day delete")
+        check(state.selectedRoutineItemIDs == [para], "restored card selected")
+
+        // Shift+click multi-select, Delete removes all, one Cmd+Z brings all back in place.
+        state.showRoutine(day: 0)
+        pump(until: { state.routineDay == 0 })
+        let rise = task("Подъём в 8 утра").id, zal = task("Зал").id
+        state.clickRoutineItem(rise, day: 0, clickCount: 1)
+        state.clickRoutineItem(zal, day: 0, clickCount: 1, shift: true)
+        check(state.selectedRoutineItemIDs == [rise, zal], "shift adds")
+        state.clickRoutineItem(zal, day: 0, clickCount: 1, shift: true)
+        check(state.selectedRoutineItemIDs == [rise], "shift removes")
+        state.clickRoutineItem(zal, day: 0, clickCount: 1, shift: true)
+        state.deleteSelectedRoutineItems()
+        check(texts(0).isEmpty, "group delete")
+        check(task("Зал").isDeleted && task("Зал").deleted == today, "last day -> archived")
+        check(!task("Подъём в 8 утра").isDeleted && task("Подъём в 8 утра").currentDays == Set(1..<7), "every-day task loses Monday")
+        state.undoRoutineDeletion()
+        pump()
+        check(texts(0) == ["Подъём в 8 утра", "Зал"], "group undo in place")
+        check(!task("Зал").isDeleted && task("Зал").done == [today], "archive undone, done kept")
+        check(task("Подъём в 8 утра").currentDays.count == 7, "schedule restored")
+        check(!state.undoRoutineDeletion(), "empty undo stack")
+
+        // Plain click toggles a single selection; double click edits.
+        state.clickRoutineItem(zal, day: 0, clickCount: 1)
+        check(state.selectedRoutineItemIDs == [zal], "click selects one")
+        state.clickRoutineItem(zal, day: 0, clickCount: 1)
+        check(state.selectedRoutineItemIDs.isEmpty, "second click deselects")
+        state.clickRoutineItem(zal, day: 0, clickCount: 1)
+        state.clickRoutineItem(zal, day: 0, clickCount: 2)
+        check(state.selectedRoutineItemIDs == [zal] && state.routineEditor?.itemID == zal, "double click edits")
+        state.routineEditor = nil
+
+        // "Удалить из всех дней": archived everywhere, undoable.
+        state.deleteRoutineTaskEverywhere(rise, day: 0)
+        check((0..<7).allSatisfy { !texts($0).contains("Подъём в 8 утра") } && task("Подъём в 8 утра").isDeleted,
+              "delete everywhere")
+        state.undoRoutineDeletion()
+        pump()
+        check((0..<7).allSatisfy { texts($0).first == "Подъём в 8 утра" }, "undo delete everywhere")
+
+        // Leaving routine focus drops the undo history.
+        state.selectRoutineItem(zal)
+        state.deleteSelectedRoutineItems()
+        state.endRoutineKeyFocus()
+        check(!state.undoRoutineDeletion(), "undo dropped after focus left")
+
+        // A schedule change on a later day opens a new period.
+        var t = task("Пара АСОИУ")
+        t.setDays([1, 5], from: "2099-01-01")
+        check(t.schedule.map(\.from) == [today, "2099-01-01"] && t.currentDays == [1, 5], "new period")
+        t.setDays([1, 2], from: "2099-01-01")
+        check(t.schedule.count == 1, "reverting same day drops the period")
+
+        // Day picker: every day lights all days; a day tapped after that
+        // drops both itself and "every day".
+        var picked: Set<Int> = [3]
+        picked = RoutineDayPicker.toggledEveryDay(picked)
+        check(picked == Set(0..<7), "every day selects all")
+        picked = RoutineDayPicker.toggled(picked, 2)
+        check(picked == [0, 1, 3, 4, 5, 6], "day off -> every day off")
+
+        // Done marks reset on the next day.
+        state.refreshToday(Date().addingTimeInterval(86_400))
+        check(!state.isRoutineItemDone(task("Пара АСОИУ")), "fresh next day")
+
+        // Persistence round-trip and readable format.
+        let reloaded = RoutineStore(fileURL: state.routineStore.fileURL).load()
+        check(reloaded == state.routine, "json round-trip")
+        let json = (try? String(contentsOf: state.routineStore.fileURL, encoding: .utf8)) ?? ""
+        check(json.contains("\"version\" : 2") && json.contains("\"tue\"") && json.contains("\"tuesday\""),
+              "readable json")
+
+        // A routine from the old per-day format is set aside, not loaded.
+        let url = URL(fileURLWithPath: "/tmp/obf_selftest_routine_v1.json")
+        let aside = URL(fileURLWithPath: "/tmp/obf_selftest_routine_v1.v1.json")
+        try? FileManager.default.removeItem(at: aside)
+        try? #"{"monday":[{"id":"5C2A7D1E-2B7C-4B4E-9E4B-1C2D3E4F5A6B","text":"Зал"}]}"#
+            .write(to: url, atomically: true, encoding: .utf8)
+        let fresh = RoutineStore(fileURL: url).load()
+        check(fresh.tasks.isEmpty && FileManager.default.fileExists(atPath: aside.path)
+              && !FileManager.default.fileExists(atPath: url.path), "v1 set aside")
+        print("    ok=\(ok)")
+        return ok
+    }
+
+    private static func scenarioV() -> Bool {
+        let state = makeRoutineState()
+        var ok = true
+        func check(_ cond: Bool, _ label: String) {
+            if !cond { print("    FAIL: \(label)"); ok = false }
+        }
+        let now = Date()
+        state.sidebarTab = .tasks
+        // Cmd+R alone: routine tab on today, no chord armed.
+        check(RoutineKeys.handle(key(RoutineKeys.keyR, "r", .command), appState: state, now: now), "cmd+r consumed")
+        check(state.sidebarTab == .routine && state.routineDay == state.routineToday, "cmd+r shows today")
+        check(!RoutineKeys.handle(key(18, "1", .command), appState: state, now: now), "cmd+r does not arm digits")
+        // Cmd+T, then Cmd+3: Wednesday (layout-independent: "е").
+        state.sidebarTab = .structure
+        check(RoutineKeys.handle(key(RoutineKeys.keyT, "е", .command), appState: state, now: now), "cmd+t consumed")
+        check(state.sidebarTab == .structure, "cmd+t alone changes nothing")
+        check(RoutineKeys.handle(key(20, "3", .command), appState: state, now: now.addingTimeInterval(0.5)), "digit consumed")
+        pump(until: { state.routineDay == 2 })
+        check(state.sidebarTab == .routine && state.routineDay == 2, "cmd+t 3 -> Wednesday")
+        // Digit after the chord window is not taken.
+        _ = RoutineKeys.handle(key(RoutineKeys.keyT, "t", .command), appState: state, now: now)
+        check(!RoutineKeys.handle(key(18, "1", .command), appState: state, now: now.addingTimeInterval(3)), "late digit passes")
+        // Plain Cmd+1 without Cmd+T passes through (heading).
+        check(!RoutineKeys.handle(key(18, "1", .command), appState: state, now: now), "cmd+1 passes")
+        // Cmd+T then 7 (Cmd released): Sunday.
+        _ = RoutineKeys.handle(key(RoutineKeys.keyT, "t", .command), appState: state, now: now)
+        _ = RoutineKeys.handle(key(26, "7"), appState: state, now: now)
+        pump(until: { state.routineDay == 6 })
+        check(state.routineDay == 6, "cmd+t 7 -> Sunday")
+
+        // Delete / Cmd+Z only while a card has the keys.
+        state.addRoutineItem("Бег", days: [6])
+        state.addRoutineItem("Растяжка", days: [6])
+        check(!RoutineKeys.handle(key(RoutineKeys.keyZ, "z", .command), appState: state), "cmd+z passes without focus")
+        let ids = state.routine.order[6]
+        state.selectRoutineItem(ids[0])
+        state.selectRoutineItem(ids[1], extend: true)
+        check(RoutineKeys.handle(key(RoutineKeys.keyBackspace, "\u{7F}"), appState: state), "delete consumed")
+        check(state.routine.tasks(on: 6).isEmpty, "both deleted by key")
+        check(RoutineKeys.handle(key(RoutineKeys.keyZ, "я", .command), appState: state), "cmd+z consumed")
+        pump(until: { state.routineDay == 6 })
+        check(state.routine.tasks(on: 6).map(\.text) == ["Бег", "Растяжка"], "restored by one cmd+z")
+        state.endRoutineKeyFocus()
+        check(!RoutineKeys.handle(key(RoutineKeys.keyBackspace, "\u{7F}"), appState: state), "delete passes after focus left")
+        print("    day=\(state.routineDay) ok=\(ok)")
+        return ok
+    }
+
+    private static func scenarioW() -> Bool {
+        var ok = true
+        func check(_ cond: Bool, _ label: String) {
+            if !cond { print("    FAIL: \(label)"); ok = false }
+        }
+        // Fixed Thursday so the demo's weekday-relative tasks are stable.
+        let today = "2026-09-24"
+        check(RoutineDate.weekday(today) == 3, "2026-09-24 is Thursday")
+        check(RoutineDate.adding(-7, to: "2026-03-31") == "2026-03-24"
+              && RoutineDate.adding(1, to: "2026-10-24") == "2026-10-25", "date math across DST")
+        let data = RoutineDemo.data(today: today)
+        func streak(_ text: String, _ day: String = today) -> RoutineStreak {
+            data.tasks.first { $0.text.hasPrefix(text) }!.streak(today: day)
+        }
+        func weekly(_ pairs: [(Int, Int)]) -> RoutineStreak { .weekly(pairs.map { (day: $0.0, count: $0.1) }) }
+        check(streak("Подъём") == .daily(12), "daily 12: \(streak("Подъём"))")
+        check(streak("Чтение") == .daily(5), "daily incl. today 5: \(streak("Чтение"))")
+        check(streak("Пара") == weekly([(1, 3), (3, 5), (5, 1)]), "ВТ-3 ЧТ-5 СБ-1: \(streak("Пара"))")
+        check(streak("Зал") == weekly([(0, 3), (2, 2), (4, 0)]), "ПН-3 СР-2 ПТ-0: \(streak("Зал"))")
+        check(streak("Генеральная") == weekly([(6, 4)]), "ВС-4: \(streak("Генеральная"))")
+        check(streak("1 час") == weekly([(3, 2)]), "ЧТ-2: \(streak("1 час"))")
+        check(streak("Статья").isEmpty, "new task: no streak")
+        check(streak("Задача «А»") == weekly([(3, 3)]), "biweekly on: ×3: \(streak("Задача «А»"))")
+        check(streak("Задача «Б»") == weekly([(3, 2)]), "biweekly off: ×2: \(streak("Задача «Б»"))")
+
+        // Marking today extends the streak; a day passing unmarked breaks it.
+        var rise = data.tasks.first { $0.text.hasPrefix("Подъём") }!
+        rise.done.append(today)
+        check(rise.streak(today: today) == .daily(13), "today done -> 13")
+        check(rise.streak(today: RoutineDate.adding(1, to: today)) == .daily(13), "next morning still 13")
+        check(rise.streak(today: RoutineDate.adding(2, to: today)) == .daily(0), "missed day -> 0")
+        var lecture = data.tasks.first { $0.text.hasPrefix("Пара") }!
+        lecture.done.append(today)
+        check(lecture.streak(today: today) == weekly([(1, 3), (3, 6), (5, 1)]), "ЧТ-6 after marking today")
+
+        // Every other week: due on alternate Thursdays, off weeks neither
+        // due nor missed, streak counts due Thursdays only.
+        check(RoutineDate.weeksBetween("2026-09-21", "2026-10-08") == 2
+              && RoutineDate.weeksBetween("2026-09-27", "2026-09-28") == 1
+              && RoutineDate.weeksBetween("2026-10-08", "2026-09-24") == -2, "weeks between")
+        check(RoutineDate.short("2026-10-01") == "1.10" && RoutineDate.short("2026-09-24") == "24.09", "short date")
+        var ab = RoutineTask(text: "А", created: "2026-09-24", schedule: [RoutineScheduleEntry(
+            from: "2026-09-24", days: [3], everyWeeks: 2, anchor: "2026-09-21")])
+        check(ab.isScheduled(on: "2026-09-24") && !ab.isScheduled(on: "2026-10-01")
+              && ab.isOffWeek(on: "2026-10-01") && ab.isScheduled(on: "2026-10-08"), "alternate Thursdays")
+        check(ab.nextDueDate(after: "2026-09-24") == "2026-10-08", "next due")
+        ab.done = ["2026-09-24", "2026-10-08"]
+        check(ab.streak(today: "2026-10-15") == weekly([(3, 2)]), "streak skips off week")
+        check(ab.streak(today: "2026-10-22") == weekly([(3, 2)]), "22.10 not marked yet: holds")
+        check(ab.streak(today: "2026-10-23") == weekly([(3, 0)]), "22.10 passed unmarked: breaks")
+        // Starting next week: this week's Thursday is not due.
+        let late = RoutineTask(text: "Б", created: "2026-09-24", schedule: [RoutineScheduleEntry(
+            from: "2026-09-24", days: [3], everyWeeks: 2, anchor: "2026-09-28")])
+        check(!late.isScheduled(on: "2026-09-24") && late.nextDueDate(after: "2026-09-24") == "2026-10-01",
+              "start next week")
+        check(Weekday.interval(2) == "через неделю" && Weekday.interval(3) == "раз в 3 недели"
+              && Weekday.interval(5) == "раз в 5 недель" && Weekday.interval(21) == "раз в 21 неделю"
+              && Weekday.interval(1) == nil, "interval wording")
+        // Round-trip keeps the plan; weekly entries stay in the short form.
+        let encoded = try! JSONEncoder().encode(ab)
+        check(try! JSONDecoder().decode(RoutineTask.self, from: encoded) == ab, "interval round-trip")
+        let weeklyJSON = String(data: try! JSONEncoder().encode(RoutineScheduleEntry(from: today, days: [1])), encoding: .utf8)!
+        check(!weeklyJSON.contains("everyWeeks") && !weeklyJSON.contains("anchor"), "weekly stays short")
+        // Switching a task from weekly to every other week and back.
+        var plan = RoutineTask(text: "В", created: today, schedule: [RoutineScheduleEntry(from: today, days: [3])])
+        plan.setPlan(RoutineScheduleEntry(from: today, days: [3], everyWeeks: 2, anchor: RoutineDate.weekStart(today)), from: "2099-01-01")
+        check(plan.schedule.count == 2 && plan.everyWeeks == 2, "interval change is a new period")
+        plan.setDays([3, 5], from: "2099-01-01")
+        check(plan.everyWeeks == 2 && plan.currentDays == [3, 5] && plan.schedule.count == 2, "day change keeps interval")
+        // Display: off-week tasks sink below done ones and are not counted.
+        let biState = makeRoutineState()
+        let d = biState.routineToday
+        biState.addRoutineItem("Вкл", days: [d], everyWeeks: 2, startOffset: 0)
+        biState.addRoutineItem("Выкл", days: [d], everyWeeks: 2, startOffset: 1)
+        biState.addRoutineItem("Обычная", days: [d])
+        biState.toggleRoutineDone(biState.routine.order[d][2])
+        check(biState.routineItemsForDisplay(day: d).map(\.text) == ["Вкл", "Обычная", "Выкл"], "off week at the bottom")
+        check(!biState.isRoutineItemActive(biState.routine.tasks(on: d)[1], day: d), "off this week")
+
+        // Reorder keeps done cards in their stored slots.
+        let state = makeRoutineState()
+        for text in ["A", "B", "C", "D"] { state.addRoutineItem(text, days: [state.routineToday]) }
+        let day = state.routineToday
+        let ids = state.routine.order[day]
+        state.toggleRoutineDone(ids[1])
+        state.reorderRoutineItems(day: day, activeOrder: [ids[3], ids[0], ids[2]])
+        check(state.routine.tasks(on: day).map(\.text) == ["D", "B", "A", "C"], "reorder around done slot")
+        check(state.routineItemsForDisplay(day: day).map(\.text) == ["D", "A", "C", "B"], "display after reorder")
+        check(RoutineStore(fileURL: state.routineStore.fileURL).load().order[day] == state.routine.order[day], "order saved")
+
+        // Drag target: cards of height 40 stacked from 0 with spacing 8.
+        let a = UUID(), b = UUID(), c = UUID()
+        let heights = [a: CGFloat(40), b: 40, c: 40]
+        func target(_ center: CGFloat) -> [UUID] {
+            RoutineDayListTesting.targetOrder(dragged: a, center: center, order: [a, b, c], heights: heights, top: 0)
+        }
+        check(target(10) == [a, b, c], "stays on top")
+        check(target(30) == [b, a, c], "past b's middle")
+        check(target(90) == [b, c, a], "to the bottom")
+        print("    ok=\(ok)")
+        return ok
     }
 
     private static func makeStack() -> (AppState, OBFTextView, Coordinator, NSTextStorage) {
@@ -402,6 +722,67 @@ enum SelfTest {
     /// initial state, the tab list under a simulated hover over the tab
     /// title, and an empty tab. Launched with --uitest-open; exits the
     /// process when done.
+    /// --uitest-routine: fills a demo routine and snapshots the routine
+    /// tab (today, done marks, selection, another day, add/edit modals)
+    /// to /tmp/obf_routine_*.png, then quits.
+    static func snapRoutine(appState: AppState) {
+        let today = appState.routineToday
+        appState.addRoutineItem("Подъём в 8 утра", days: Array(0..<7))
+        appState.addRoutineItem("Зал с 9 утра до 10:30", days: [0, 2, 4])
+        appState.addRoutineItem("1 час на обучении: линал, ангем, тервер, матстат", days: [today])
+        appState.addRoutineItem("1 час на изучении статей по диплому", days: [today])
+        appState.addRoutineItem("Пара в 15:55 — Аналитические модели АСОИУ", days: [1, 3])
+        appState.addRoutineItem("Бег 5 км", days: [(today + 1) % 7])
+        appState.showRoutine(day: nil)
+        func snap(_ window: NSWindow, _ name: String) {
+            guard let view = window.contentView,
+                  let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+            view.cacheDisplay(in: view.bounds, to: rep)
+            if let data = rep.representation(using: .png, properties: [:]) {
+                try? data.write(to: URL(fileURLWithPath: "/tmp/obf_routine_\(name).png"))
+            }
+        }
+        func after(_ t: Double, _ block: @escaping () -> Void) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + t, execute: block)
+        }
+        after(1.0) {
+            guard let window = NSApp.windows.first(where: { $0.isVisible }) else { exit(1) }
+            snap(window, "1_today")
+            let items = appState.routine.tasks(on: today)
+            appState.toggleRoutineDone(items[0].id)
+            appState.selectRoutineItem(items[1].id)
+            appState.selectRoutineItem(items[2].id, extend: true)
+            after(0.6) {
+                snap(window, "2_done_selected")
+                appState.selectRoutineDay((today + 1) % 7, forward: true)
+                after(0.8) {
+                    snap(window, "3_next_day")
+                    appState.routineEditor = RoutineEditorRequest(day: appState.routineDay, itemID: nil)
+                    after(0.8) {
+                        if let sheet = window.attachedSheet { snap(sheet, "4_add_modal") }
+                        appState.routineEditor = nil
+                        after(0.8) {
+                            appState.routineEditor = RoutineEditorRequest(
+                                day: today, itemID: appState.routine.tasks(on: today).first?.id)
+                        }
+                        after(1.6) {
+                            if let sheet = window.attachedSheet { snap(sheet, "4b_edit_modal") }
+                            appState.routineEditor = nil
+                        }
+                        after(2.4) {
+                            appState.selectRoutineDay((today + 2) % 7, forward: true)
+                            after(0.8) {
+                                snap(window, "5_empty_day")
+                                print("ROUTINE-SNAP done")
+                                exit(0)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     static func measureOpen(appState: AppState) {
         func measure(_ label: String) {
             guard let coordinator = appState.editor as? Coordinator,
@@ -435,6 +816,26 @@ enum SelfTest {
             view.cacheDisplay(in: view.bounds, to: rep)
             if let data = rep.representation(using: .png, properties: [:]) {
                 try? data.write(to: URL(fileURLWithPath: "/tmp/obf_open_\(name).png"))
+            }
+        }
+        /// Opens the task modal for an active and then a done task,
+        /// snapshotting the sheet window each time, then closes it.
+        func snapTaskModals(_ window: NSWindow, then next: @escaping () -> Void) {
+            appState.modalTaskID = appState.tasks.first(where: { !$0.done })?.id
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                let sheet = window.attachedSheet
+                print("OPEN-MEASURE task-modal active: sheet=\(sheet != nil) ok=\(sheet != nil)")
+                if let sheet { snap(sheet, "9a_modal_active") }
+                appState.modalTaskID = appState.tasks.first(where: { $0.done })?.id
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    if let sheet = window.attachedSheet { snap(sheet, "9b_modal_done") }
+                    appState.modalTaskID = nil
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                        let closed = window.attachedSheet == nil
+                        print("OPEN-MEASURE task-modal closed: ok=\(closed)")
+                        next()
+                    }
+                }
             }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
@@ -541,7 +942,7 @@ enum SelfTest {
                                 Обычный текст перед заданием
                                 - [ ] <!-- 2026-09-20 --> Купить молоко и хлеб
                                 - [x] <!-- 2026-09-19 --> Сдать лабораторную работу
-                                - [ ] <!-- 2026-09-21 --> Очень длинное задание, которое точно не влезет в одну строку редактора и должно перенестись на следующую строку с отступом
+                                - [ ] <!-- 2026-09-21 --> Очень длинное задание, которое точно не влезет в одну строку редактора и должно перенестись на следующую строку с отступом — и ещё одно предложение для длины, и ещё одно, и ещё, и ещё одно, и ещё немного текста, чтобы в карточке точно было больше восьми строк и появился скролл
                                 Обычный текст после задания
                                 """))
                             // Mid-animation snapshot (~0.2 s after the
@@ -552,44 +953,118 @@ enum SelfTest {
                             }
                             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                                 snap(window, "4_tasks")
-                                // Typing in a task: its card switches to
-                                // the wiggling "Печатаем задание" state.
-                                if let firstTask = appState.tasks.first {
-                                    textView.setSelectedRange(NSRange(location: firstTask.range.location + 1, length: 0))
-                                    textView.insertText("…", replacementRange: textView.selectedRange())
-                                }
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                                    snap(window, "5_typing_task")
-                                    // Bug repro: Enter from inside the
-                                    // task, Cmd+3 on the new line, type —
-                                    // only the NEW card may wiggle.
-                                    if let firstTask = appState.tasks.first {
-                                        textView.setSelectedRange(NSRange(location: NSMaxRange(firstTask.range) - 1, length: 0))
+                                // Expand the first card: it grows into
+                                // the capped, scrollable box. Synthetic
+                                // clicks don't reliably reach SwiftUI tap
+                                // gestures, so the test drives the same
+                                // AppState flag the tap toggles.
+                                appState.expandedTaskID = appState.tasks.first?.id
+                                /// Deepest-first search for a view of the
+                                /// given type in the hierarchy.
+                                func findView<T: NSView>(_ type: T.Type, in view: NSView) -> T? {
+                                    for sub in view.subviews.reversed() {
+                                        if let hit = sub as? T { return hit }
+                                        if let hit = findView(type, in: sub) { return hit }
                                     }
-                                    textView.insertNewline(nil)
-                                    coordinator.toggleTask()
-                                    textView.insertText("абв", replacementRange: textView.selectedRange())
-                                    // Let the debounced refresh create
-                                    // the new card, then keep typing so
-                                    // the snapshot catches it wiggling
-                                    // while the old card stays still.
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
-                                        textView.insertText("г", replacementRange: textView.selectedRange())
-                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                                            snap(window, "6_enter_cmd3_typing")
-                                            storage.setAttributedString(coordinator.render(markdown: original))
-                                            // The demo refresh saved the
-                                            // demo to disk; write the
-                                            // original back right now.
-                                            coordinator.saveNow()
-                                            sv.contentView.scroll(to: NSPoint(x: 0, y: 120))
-                                            sv.reflectScrolledClipView(sv.contentView)
-                                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                                                measure("after-scroll")
-                                                _ = content
-                                                exit(0)
+                                    return nil
+                                }
+                                /// A synthetic scroll-wheel NSEvent built
+                                /// from a CGEvent. Posted scroll events
+                                /// never reach the view hierarchy (their
+                                /// window is nil), so the test calls
+                                /// scrollWheel(with:) directly.
+                                func scrollEvent(dy: Int32, phase: Int64 = 2) -> NSEvent? {
+                                    guard let source = CGEventSource(stateID: .hidSystemState),
+                                          let cg = CGEvent(scrollWheelEvent2Source: source, units: .pixel,
+                                                           wheelCount: 2, wheel1: dy, wheel2: 0, wheel3: 0)
+                                    else { return nil }
+                                    cg.setIntegerValueField(.scrollWheelEventScrollPhase, value: phase)
+                                    return NSEvent(cgEvent: cg)
+                                }
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                                    snap(window, "5_expanded_task")
+                                    // Scroll the expanded card's text box:
+                                    // the text must move while the sidebar
+                                    // list stays put — at both edges too.
+                                    if let trap = findView(TrappedScrollView.self, in: content) {
+                                        var outer: NSScrollView?
+                                        var ancestor = trap.superview
+                                        while let view = ancestor {
+                                            if let sv = view as? NSScrollView { outer = sv; break }
+                                            ancestor = view.superview
+                                        }
+                                        func scroll(_ dy: Int32, _ times: Int) {
+                                            if let began = scrollEvent(dy: 0, phase: 1) { trap.scrollWheel(with: began) }
+                                            for _ in 0..<times {
+                                                if let event = scrollEvent(dy: dy) { trap.scrollWheel(with: event) }
+                                            }
+                                            if let ended = scrollEvent(dy: 0, phase: 4) { trap.scrollWheel(with: ended) }
+                                        }
+                                        scroll(30, 8)
+                                        let offAfterDown = trap.contentView.bounds.origin.y
+                                        scroll(30, 40) // reach the bottom edge
+                                        let sidebarBefore = outer?.contentView.bounds.origin ?? .zero
+                                        scroll(30, 8)  // at the edge: must not leak to the sidebar
+                                        let leakDown = (outer?.contentView.bounds.origin ?? .zero) != sidebarBefore
+                                        scroll(-30, 60)  // back to the top edge
+                                        let atTop = trap.contentView.bounds.origin.y
+                                        scroll(-30, 8)
+                                        let leakUp = (outer?.contentView.bounds.origin ?? .zero) != sidebarBefore
+                                        let trapOK = offAfterDown > 0 && atTop <= 0.5 && !leakDown && !leakUp
+                                        print("OPEN-MEASURE trapped-scroll: docH=\(trap.documentView?.frame.height ?? -1) clipH=\(trap.contentView.bounds.height) moved=\(offAfterDown) top=\(atTop) leakDown=\(leakDown) leakUp=\(leakUp) ok=\(trapOK)")
+                                        scroll(30, 4) // leave it visibly scrolled for the snapshot
+                                    } else {
+                                        print("OPEN-MEASURE trapped-scroll: TrappedScrollView not found ok=false")
+                                    }
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                                        snap(window, "6_expanded_scrolled")
+                                        appState.expandedTaskID = nil
+                                        snapTaskModals(window) {
+                                        // Typing in a task: its card
+                                        // switches to the wiggling
+                                        // "Печатаем задание" state.
+                                        if let firstTask = appState.tasks.first {
+                                            textView.setSelectedRange(NSRange(location: firstTask.range.location + 1, length: 0))
+                                            textView.insertText("…", replacementRange: textView.selectedRange())
+                                        }
+                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                                            snap(window, "7_typing_task")
+                                            // Bug repro: Enter from inside
+                                            // the task, Cmd+3 on the new
+                                            // line, type — only the NEW
+                                            // card may wiggle.
+                                            if let firstTask = appState.tasks.first {
+                                                textView.setSelectedRange(NSRange(location: NSMaxRange(firstTask.range) - 1, length: 0))
+                                            }
+                                            textView.insertNewline(nil)
+                                            coordinator.toggleTask()
+                                            textView.insertText("абв", replacementRange: textView.selectedRange())
+                                            // Let the debounced refresh
+                                            // create the new card, then
+                                            // keep typing so the snapshot
+                                            // catches it wiggling while
+                                            // the old card stays still.
+                                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
+                                                textView.insertText("г", replacementRange: textView.selectedRange())
+                                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                                    snap(window, "8_enter_cmd3_typing")
+                                                    storage.setAttributedString(coordinator.render(markdown: original))
+                                                    // The demo refresh
+                                                    // saved the demo to
+                                                    // disk; write the
+                                                    // original back.
+                                                    coordinator.saveNow()
+                                                    sv.contentView.scroll(to: NSPoint(x: 0, y: 120))
+                                                    sv.reflectScrolledClipView(sv.contentView)
+                                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                                                        measure("after-scroll")
+                                                        _ = content
+                                                        exit(0)
+                                                    }
+                                                }
                                             }
                                         }
+                                    }
                                     }
                                 }
                             }
@@ -919,58 +1394,39 @@ enum SelfTest {
         return ok
     }
 
-    /// The expanded task text box (TrappedScrollView) scrolls its own
-    /// content when it can and consumes the event at its edges — the event
-    /// is never forwarded up the responder chain, so the sidebar's scroll
-    /// view cannot start scrolling while the pointer is inside the box.
+    /// The expanded task text box (TrappedScrollView) lets a scroll event
+    /// through only while its content can still move in the event's
+    /// direction; at the edges the event is eaten, so the sidebar's scroll
+    /// view never starts scrolling while the pointer is inside the box.
+    private static func scenarioT() -> Bool {
+        let short = !TaskCardView.needsExpansion("Купить молоко")
+        let two = !TaskCardView.needsExpansion("Если задание слишком короткое")
+        let long = TaskCardView.needsExpansion(String(repeating: "Очень длинное задание ", count: 6))
+        let ok = short && two && long
+        print("    short=\(short) twoLines=\(two) long=\(long)")
+        print("    -> OK: \(ok)")
+        return ok
+    }
+
     private static func scenarioS() -> Bool {
-        final class ScrollProbe: NSResponder {
-            var received = 0
-            override func scrollWheel(with event: NSEvent) { received += 1 }
+        let max: CGFloat = 432
+        var ok = true
+        // Both natural-scrolling settings: at the top, only toward-bottom
+        // events may pass; at the bottom, only toward-top.
+        for inverted in [false, true] {
+            let bottomDelta: CGFloat = inverted ? -10 : 10
+            ok = ok && TrappedScrollView.shouldScroll(offset: 0, maxOffset: max, deltaY: bottomDelta, inverted: inverted)
+            ok = ok && !TrappedScrollView.shouldScroll(offset: 0, maxOffset: max, deltaY: -bottomDelta, inverted: inverted)
+            ok = ok && !TrappedScrollView.shouldScroll(offset: max, maxOffset: max, deltaY: bottomDelta, inverted: inverted)
+            ok = ok && TrappedScrollView.shouldScroll(offset: max, maxOffset: max, deltaY: -bottomDelta, inverted: inverted)
+            // Mid-scroll: both directions pass.
+            ok = ok && TrappedScrollView.shouldScroll(offset: max / 2, maxOffset: max, deltaY: bottomDelta, inverted: inverted)
+            ok = ok && TrappedScrollView.shouldScroll(offset: max / 2, maxOffset: max, deltaY: -bottomDelta, inverted: inverted)
         }
+        // Content fits without scrolling: nothing passes.
+        ok = ok && !TrappedScrollView.shouldScroll(offset: 0, maxOffset: 0, deltaY: 10, inverted: true)
+            && !TrappedScrollView.shouldScroll(offset: 0, maxOffset: 0, deltaY: -10, inverted: true)
 
-        let scrollView = TrappedScrollView(frame: NSRect(x: 0, y: 0, width: 168, height: 128))
-        let textView = FlippedTextView(frame: NSRect(x: 0, y: 0, width: 168, height: 500))
-        textView.string = (1...40).map(String.init).joined(separator: "\n")
-        scrollView.documentView = textView
-        scrollView.layoutSubtreeIfNeeded()
-        let probe = ScrollProbe()
-        scrollView.nextResponder = probe
-
-        func wheel(_ dy: Int32) -> NSEvent? {
-            guard let source = CGEventSource(stateID: .hidSystemState),
-                  let cg = CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 1, wheel1: dy, wheel2: 0, wheel3: 0),
-                  let event = NSEvent(cgEvent: cg) else { return nil }
-            return event
-        }
-        guard let positive = wheel(10), let negative = wheel(-10) else {
-            print("    -> OK: false (cannot synthesize scroll events)")
-            return false
-        }
-        // Which sign scrolls toward the bottom depends on the system's
-        // natural-scrolling setting; read it from the event itself.
-        let towardBottom = positive.isDirectionInvertedFromDevice ? positive : negative
-        let towardTop = positive.isDirectionInvertedFromDevice ? negative : positive
-
-        // At the top, a toward-top event is eaten: no movement, no forward.
-        scrollView.scrollWheel(with: towardTop)
-        let stayedAtTop = scrollView.contentView.bounds.origin.y == 0
-        let notForwardedAtTop = probe.received == 0
-
-        // Toward-bottom events scroll the content...
-        for _ in 0..<100 { scrollView.scrollWheel(with: towardBottom) }
-        let bottomOffset = scrollView.contentView.bounds.origin.y
-        let scrolledDown = bottomOffset > 0
-        let notForwardedWhileScrolling = probe.received == 0
-
-        // ...and at the bottom the event is eaten again.
-        scrollView.scrollWheel(with: towardBottom)
-        let stayedAtBottom = scrollView.contentView.bounds.origin.y == bottomOffset
-        let notForwardedAtBottom = probe.received == 0
-
-        print("    stayedAtTop=\(stayedAtTop) scrolledDown=\(scrolledDown) bottom=\(bottomOffset) stayedAtBottom=\(stayedAtBottom) forwarded=\(probe.received)")
-        let ok = stayedAtTop && scrolledDown && stayedAtBottom
-            && notForwardedAtTop && notForwardedWhileScrolling && notForwardedAtBottom
         print("    -> OK: \(ok)")
         return ok
     }

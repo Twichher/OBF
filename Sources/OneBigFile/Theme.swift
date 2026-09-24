@@ -15,10 +15,16 @@ enum OBFTheme {
     /// from body text and from H2.
     static let h1TextNS = NSColor(calibratedRed: 0xFF / 255.0, green: 0xB4 / 255.0, blue: 0x4D / 255.0, alpha: 1)
 
+    /// Accent of done tasks in the task modal — a muted green.
+    static let doneNS = NSColor(calibratedRed: 0x6F / 255.0, green: 0xC2 / 255.0, blue: 0x8B / 255.0, alpha: 1)
+
     static let bg = Color(nsColor: bgNS)
+    static let h1Text = Color(nsColor: h1TextNS)
+    static let done = Color(nsColor: doneNS)
     static let text = Color(nsColor: textNS)
     static let border = Color(nsColor: borderNS)
     static let elevated = Color(nsColor: elevatedNS)
+    static let selection = Color(nsColor: selectionNS)
 
     static let minBodySize: Double = 10
     static let maxBodySize: Double = 28
