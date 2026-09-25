@@ -83,10 +83,21 @@ final class OBFTextView: NSTextView {
         }
     }
 
-    /// Centers a text column of at most OBFTheme.textColumnWidth: the
-    /// horizontal inset grows with the view, never below 20.
+    /// Centers a text column of at most OBFTheme.textColumnWidth (never
+    /// closer than 20 to the edges). The column's width is set explicitly
+    /// instead of tracking the view: while the view resizes (the sidebar
+    /// sliding), the column stays exactly the same width, so no line
+    /// re-wraps and nothing jitters — only the inset moves, in half-point
+    /// (one Retina pixel) steps so glyphs keep their pixel alignment.
     func updateColumnInsets() {
-        let horizontal = max(20, floor((frame.width - OBFTheme.textColumnWidth) / 2))
+        let column = max(0, min(OBFTheme.textColumnWidth, frame.width - 40))
+        if let textContainer {
+            textContainer.widthTracksTextView = false
+            if abs(textContainer.size.width - column) > 0.01 {
+                textContainer.size = NSSize(width: column, height: CGFloat.greatestFiniteMagnitude)
+            }
+        }
+        let horizontal = max(20, floor(frame.width - column) / 2)
         let inset = NSSize(width: horizontal, height: OBFTheme.textTopInset)
         if textContainerInset != inset {
             textContainerInset = inset

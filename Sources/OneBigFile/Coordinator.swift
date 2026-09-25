@@ -527,7 +527,10 @@ final class Coordinator: NSObject, NSTextViewDelegate, NSLayoutManagerDelegate, 
             let content = self.contentRange(of: enclosing)
             guard content.length > 0 else { return }
             if let level = storage.attribute(.obfHeadingLevel, at: content.location, effectiveRange: nil) as? Int {
-                let title = substring ?? ""
+                // Tabs or spaces typed before a heading indent it in the
+                // text only; the outline, breadcrumb and task headers show
+                // the bare title.
+                let title = (substring ?? "").trimmingCharacters(in: .whitespaces)
                 items.append(OutlineItem(title: title, level: level, range: enclosing))
                 // Headings above a task become its header in the
                 // "Задания" tab; a new H1 resets the H2 below it.
@@ -561,6 +564,7 @@ final class Coordinator: NSObject, NSTextViewDelegate, NSLayoutManagerDelegate, 
         }
         appState.outline = items
         updateBreadcrumb()
+        updateCurrentHeading()
         appState.updateTasks(tasks.filter { !$0.done }.sorted(by: newestFirst)
             + tasks.filter { $0.done }.sorted(by: newestFirst))
     }
@@ -1095,6 +1099,22 @@ final class Coordinator: NSObject, NSTextViewDelegate, NSLayoutManagerDelegate, 
         guard selection != lastSyncedSelection else { return }
         lastSyncedSelection = selection
         syncTypingAttributes()
+        updateCurrentHeading()
+    }
+
+    /// Marks the headings the caret is under — the nearest H1 above it and,
+    /// below that H1, the nearest H2 — for the "Структура" tab. Right under
+    /// an H1 (before its first H2) only the H1 is marked.
+    private func updateCurrentHeading() {
+        guard let textView else { return }
+        let caret = textView.selectedRange().location
+        let above = appState.outline.filter { $0.range.location <= caret }
+        let h1 = above.last { $0.level == 1 }
+        let h2 = above.last { $0.level == 2 && $0.range.location > (h1?.range.location ?? -1) }
+        let ids = Set([h1?.id, h2?.id].compactMap { $0 })
+        if appState.currentOutlineIDs != ids {
+            appState.currentOutlineIDs = ids
+        }
     }
 
     // MARK: - Find
@@ -1218,6 +1238,12 @@ final class Coordinator: NSObject, NSTextViewDelegate, NSLayoutManagerDelegate, 
     /// Test hook: the live text view, for --replay modes that drive the real
     /// app window.
     var debugTextView: OBFTextView? { textView }
+    var debugAppState: AppState { appState }
+    /// Tests: rebuild the outline now (normally debounced after edits).
+    func debugRebuildOutline() {
+        rebuildOutline()
+    }
+
     /// Tests: restyle the whole document (loadDocument does this).
     func debugApplyStyles() {
         guard let storage = textView?.textStorage, storage.length > 0 else { return }

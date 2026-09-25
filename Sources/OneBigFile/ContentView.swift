@@ -37,8 +37,8 @@ struct ContentView: View {
                 .frame(width: OBFTheme.sidebarWidth)
                 .frame(maxHeight: .infinity)
                 .background(SidebarCard())
-                // Top edge level with the sheet's.
-                .padding(.top, OBFTheme.paperTopGap)
+                // Top edge level with the sheet's; the same margin below.
+                .padding(.vertical, OBFTheme.paperTopGap)
                 .padding(.leading, OBFTheme.sidebarGap)
                 .opacity(appState.sidebarVisible ? 1 : 0)
                 .frame(width: appState.sidebarVisible ? OBFTheme.sidebarWidth + OBFTheme.sidebarGap : 0,
@@ -71,6 +71,15 @@ struct ContentView: View {
             RoutineKeys.install(appState: appState)
             if CommandLine.arguments.contains("--replay-bug2") {
                 SelfTest.replayBug2(appState: appState)
+            }
+            if CommandLine.arguments.contains("--uitest-tabbar") {
+                SelfTest.snapTabBar(appState: appState)
+            }
+            if CommandLine.arguments.contains("--uitest-idle") {
+                SelfTest.measureIdle(appState: appState)
+            }
+            if CommandLine.arguments.contains("--uitest-picker") {
+                SelfTest.snapPicker(appState: appState)
             }
             if CommandLine.arguments.contains("--uitest-outline") {
                 SelfTest.snapOutline(appState: appState)
@@ -167,7 +176,7 @@ private struct TabPickerCard: View {
         .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
             .fill(highlighted ? OBFTheme.selection.opacity(0.45) : Color.clear))
         .contentShape(Rectangle())
-        .onHover { if $0 { appState.tabPickerIndex = index } }
+        .onHover { if $0 { appState.hoverTabPicker(index) } }
         .onTapGesture { appState.openSidebarTab(tab) }
     }
 }
@@ -817,6 +826,11 @@ struct SidebarView: View {
 
     private var tabListVisible: Bool { hoveringTitle || hoveringList }
 
+    /// Tab bar slots: the arrows' click areas and the title between them
+    /// (wide enough for the longest name, "Фотографии").
+    private static let arrowSlot: CGFloat = 44
+    private static let titleSlot: CGFloat = 150
+
     var body: some View {
         VStack(spacing: 0) {
             tabContent
@@ -931,27 +945,36 @@ struct SidebarView: View {
     // MARK: - Bottom tab bar
 
     private var tabBar: some View {
-        HStack(spacing: 26) {
+        // Fixed slots: the arrows never move whatever the tab's name,
+        // so they can be clicked repeatedly without chasing them.
+        HStack(spacing: 0) {
             Button {
                 appState.selectPrevSidebarTab()
             } label: {
                 Image(systemName: "chevron.left")
+                    .frame(width: Self.arrowSlot, height: 32)
+                    .contentShape(Rectangle())
             }
 
             Text(appState.sidebarTab.title)
                 .font(OBFTheme.ui(17))
                 .foregroundColor(OBFTheme.text)
+                .lineLimit(1)
+                .contentTransition(.opacity)
                 // The padded, shape-extended title is the hover zone; it
                 // reaches the bar's top edge so the cursor can travel into
                 // the floating list without the hover dropping in between.
                 .padding(.vertical, 8)
                 .contentShape(Rectangle())
                 .onHover { hoveringTitle = $0 }
+                .frame(width: Self.titleSlot)
 
             Button {
                 appState.selectNextSidebarTab()
             } label: {
                 Image(systemName: "chevron.right")
+                    .frame(width: Self.arrowSlot, height: 32)
+                    .contentShape(Rectangle())
             }
         }
         .font(.system(size: 15, weight: .light))

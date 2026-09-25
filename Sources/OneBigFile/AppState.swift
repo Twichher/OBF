@@ -185,6 +185,10 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Outline ids of the H1 / H2 the caret is under (see
+    /// Coordinator.updateCurrentHeading); they shimmer in "Структура".
+    @Published var currentOutlineIDs: Set<Int> = []
+
     /// Titles of the H1 headings folded in the "Структура" tab. Persisted.
     @Published var collapsedOutline: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "collapsedOutline") ?? []) {
         didSet { UserDefaults.standard.set(Array(collapsedOutline).sorted(), forKey: "collapsedOutline") }
@@ -286,9 +290,21 @@ final class AppState: ObservableObject {
     @Published private(set) var tabPickerVisible = false
     @Published var tabPickerIndex = 0
 
+    /// Pointer position when the picker opened: a row under a resting
+    /// pointer must not steal the highlight from the open tab.
+    private(set) var tabPickerMouseAtOpen: NSPoint = .zero
+
     func showTabPicker() {
         tabPickerIndex = sidebarTab.rawValue
+        tabPickerMouseAtOpen = NSEvent.mouseLocation
         tabPickerVisible = true
+    }
+
+    /// Hover over a picker row: highlights it once the pointer has moved.
+    func hoverTabPicker(_ index: Int) {
+        let mouse = NSEvent.mouseLocation
+        guard abs(mouse.x - tabPickerMouseAtOpen.x) > 1 || abs(mouse.y - tabPickerMouseAtOpen.y) > 1 else { return }
+        tabPickerIndex = index
     }
 
     func hideTabPicker() {

@@ -945,6 +945,122 @@ enum SelfTest {
         }
     }
 
+    /// --uitest-idle: caret inside a section (the current heading
+    /// shimmers in "Структура"), then measures the CPU time the app burns
+    /// over 5 idle seconds.
+    static func measureIdle(appState: AppState) {
+        func cpuSeconds() -> Double {
+            var usage = rusage()
+            getrusage(RUSAGE_SELF, &usage)
+            return Double(usage.ru_utime.tv_sec + usage.ru_stime.tv_sec)
+                + Double(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) / 1_000_000
+        }
+        appState.setSidebarVisible(true)
+        appState.sidebarTab = .structure
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            if let textView = (appState.editor as? Coordinator)?.debugTextView, let storage = textView.textStorage {
+                let at = (storage.string as NSString).range(of: "лабы 1 - 4").location
+                if at != NSNotFound { textView.setSelectedRange(NSRange(location: at, length: 0)) }
+            }
+        }
+        var start = 0.0
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { start = cpuSeconds() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 7.0) {
+            print(String(format: "IDLE cpu over 5 s: %.2f s (%.0f%%) current=%d", cpuSeconds() - start,
+                         (cpuSeconds() - start) / 5 * 100, appState.currentOutlineIDs.count))
+            exit(0)
+        }
+    }
+
+    /// --uitest-picker: opens and closes the Cmd+K picker through real key
+    /// events, then switches tabs, snapping after each step to
+    /// /tmp/obf_picker_*.png — the window must keep updating.
+    static func snapPicker(appState: AppState) {
+        func snap(_ name: String) {
+            guard let window = NSApp.windows.first(where: { $0.isVisible }),
+                  let view = window.contentView,
+                  let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+            view.cacheDisplay(in: view.bounds, to: rep)
+            try? rep.representation(using: .png, properties: [:])?
+                .write(to: URL(fileURLWithPath: "/tmp/obf_picker_\(name).png"))
+        }
+        func press(_ code: UInt16, _ chars: String, _ flags: NSEvent.ModifierFlags = []) {
+            guard let window = NSApp.windows.first(where: { $0.isVisible }),
+                  let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags,
+                                               timestamp: ProcessInfo.processInfo.systemUptime,
+                                               windowNumber: window.windowNumber, context: nil,
+                                               characters: chars, charactersIgnoringModifiers: chars,
+                                               isARepeat: false, keyCode: code) else { return }
+            NSApp.postEvent(event, atStart: false)
+        }
+        func after(_ t: Double, _ block: @escaping () -> Void) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + t, execute: block)
+        }
+        // No snapshots between the steps: rendering the window's big soft
+        // shadows into a bitmap takes seconds on the CPU and would stall
+        // the posted keys. State is logged instead; one snapshot at the end.
+        let tabWas = appState.sidebarTab
+        func state(_ label: String) {
+            print("PICKER \(label): tab=\(appState.sidebarTab.title) picker=\(appState.tabPickerVisible) index=\(appState.tabPickerIndex) sidebar=\(appState.sidebarVisible)")
+        }
+        after(1.0) { press(RoutineKeys.keyK, "k", .command) }
+        after(1.4) { state("cmd+K"); press(RoutineKeys.keyDown, "") }
+        after(1.7) { state("down"); press(RoutineKeys.keyEscape, "\u{1B}") }
+        after(2.0) { state("esc"); press(35, "p", [.command, .shift]) }
+        after(2.3) { state("cmd+shift+P"); appState.setSidebarVisible(false) }
+        after(2.9) { press(RoutineKeys.keyK, "k", .command) }
+        after(3.2) { press(20, "3") }
+        after(3.8) { state("hidden, cmd+K, 3"); press(RoutineKeys.keyK, "k", .command) }
+        after(4.1) { press(RoutineKeys.keyDown, ""); press(RoutineKeys.keyReturn, "\r") }
+        after(4.6) { state("cmd+K, down, return") }
+        after(5.0) {
+            snap("final")
+            appState.sidebarTab = tabWas
+            print("PICKER-SNAP done")
+            exit(0)
+        }
+    }
+
+    /// --uitest-tabbar: the tab bar under tabs with short and long names
+    /// (the arrows must not move) and "Структура" with the caret inside a
+    /// section (current-heading shimmer), to /tmp/obf_tabbar_*.png. Each
+    /// step starts after the previous snapshot has finished.
+    static func snapTabBar(appState: AppState) {
+        let tabWas = appState.sidebarTab
+        func snap(_ name: String) {
+            guard let window = NSApp.windows.first(where: { $0.isVisible }),
+                  let view = window.contentView,
+                  let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+            view.cacheDisplay(in: view.bounds, to: rep)
+            try? rep.representation(using: .png, properties: [:])?
+                .write(to: URL(fileURLWithPath: "/tmp/obf_tabbar_\(name).png"))
+        }
+        var steps: [(String, () -> Void)] = [("structure", {
+            appState.setSidebarVisible(true)
+            appState.sidebarTab = .structure
+            if let textView = (appState.editor as? Coordinator)?.debugTextView, let storage = textView.textStorage {
+                let at = (storage.string as NSString).range(of: "лабы 1 - 4").location
+                if at != NSNotFound { textView.setSelectedRange(NSRange(location: at, length: 0)) }
+            }
+        })]
+        for tab in [SidebarTab.photos, .routine, .control, .tasks] {
+            steps.append((tab.rawValue.description, { appState.sidebarTab = tab }))
+        }
+        func run(_ index: Int) {
+            guard index < steps.count else {
+                appState.sidebarTab = tabWas
+                print("TABBAR-SNAP done")
+                exit(0)
+            }
+            steps[index].1()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                snap(steps[index].0)
+                DispatchQueue.main.async { run(index + 1) }
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { run(0) }
+    }
+
     /// --uitest-outline: hovers a cut-short heading in "Структура" (the
     /// real cursor is moved there and back), snaps the tooltip, then folds
     /// the first foldable H1 and snaps again, to /tmp/obf_outline_*.png.
@@ -978,6 +1094,16 @@ enum SelfTest {
         appState.collapsedOutline = []
         appState.setSidebarVisible(true)
         appState.sidebarTab = .structure
+        after(0.8) {
+            // Caret inside a section, to show the current-heading shimmer.
+            if let textView = (appState.editor as? Coordinator)?.debugTextView, let storage = textView.textStorage {
+                let at = (storage.string as NSString).range(of: "лабы 1 - 4").location
+                if at != NSNotFound {
+                    textView.window?.makeFirstResponder(textView)
+                    textView.setSelectedRange(NSRange(location: at, length: 0))
+                }
+            }
+        }
         let x = OBFTheme.windowWidth - OBFTheme.contentPadding - OBFTheme.sidebarWidth + 90
         after(1.2) { hover(windowX: x, fromTop: 245) }
         after(1.4) { hover(windowX: x + 2, fromTop: 246) }
@@ -996,6 +1122,16 @@ enum SelfTest {
         after(3.8) {
             snap("3_picker")
             appState.hideTabPicker()
+            appState.sidebarTab = .photos
+        }
+        after(4.4) {
+            snap("4_tab_photos")
+            print("OUTLINE state tab=\(appState.sidebarTab.title) picker=\(appState.tabPickerVisible) visible=\(appState.sidebarVisible)")
+            appState.sidebarTab = .routine
+        }
+        after(5.0) {
+            snap("5_tab_routine")
+            appState.sidebarTab = .structure
             if let restore { CGWarpMouseCursorPosition(restore) }
             appState.collapsedOutline = foldsWere
             UserDefaults.standard.synchronize()
@@ -1022,14 +1158,36 @@ enum SelfTest {
         let sampler = Timer(timeInterval: 1.0 / 60, repeats: true) { _ in
             if let textView = (appState.editor as? Coordinator)?.debugTextView {
                 let y = textView.enclosingScrollView?.contentView.bounds.minY ?? -1
-                widths.append("\(Int(Date().timeIntervalSince(start) * 1000) % 100000):\(Int(textView.frame.width))/y\(Int(y))")
+                let column = textView.textContainer?.size.width ?? -1
+                // First character at the top of the visible text, and
+                // where its line sits: both must hold still.
+                var top = -1
+                var lineY = -1
+                if let lm = textView.layoutManager, let tc = textView.textContainer {
+                    let visibleTop = y - textView.textContainerOrigin.y + 60
+                    let glyph = lm.glyphIndex(for: NSPoint(x: 0, y: visibleTop), in: tc)
+                    top = lm.characterIndexForGlyph(at: glyph)
+                    lineY = Int(lm.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil).minY)
+                }
+                widths.append("\(Int(textView.frame.width))/c\(String(format: "%.1f", column))/y\(Int(y))/top\(top)@\(lineY)")
             }
         }
         func after(_ t: Double, _ block: @escaping () -> Void) {
             DispatchQueue.main.asyncAfter(deadline: .now() + t, execute: block)
         }
         appState.setSidebarVisible(true)
-        after(1.0) {
+        after(0.8) {
+            // Mid-document, like the reported case.
+            guard let textView = (appState.editor as? Coordinator)?.debugTextView,
+                  let storage = textView.textStorage, let lm = textView.layoutManager,
+                  let tc = textView.textContainer else { return }
+            let target = (storage.string as NSString).range(of: "При этом выглядеть это должно так")
+            guard target.location != NSNotFound else { print("SIDEBAR marker not found"); return }
+            lm.ensureLayout(for: tc)
+            let rect = lm.lineFragmentRect(forGlyphAt: lm.glyphIndexForCharacter(at: target.location), effectiveRange: nil)
+            textView.scroll(NSPoint(x: 0, y: rect.minY + textView.textContainerOrigin.y))
+        }
+        after(1.2) {
             snap("1_shown")
             RunLoop.main.add(sampler, forMode: .common)
             appState.toggleSidebar()
@@ -1762,6 +1920,20 @@ enum SelfTest {
             check(glyph == expected && expected != 0, "bullet glyph drawn")
         }
         check(coordinator.serialize(storage: storage) == markdown, "markdown round-trip unchanged")
+
+        // Outline titles drop the indent typed before a heading; the
+        // headings the caret is under are marked (H1, or H1 + H2).
+        let appState = coordinator.debugAppState
+        storage.setAttributedString(coordinator.render(markdown: "# \tПервый\nтекст\n## Раздел\nещё\n# Второй\nхвост"))
+        coordinator.debugRebuildOutline()
+        check(appState.outline.map(\.title) == ["Первый", "Раздел", "Второй"], "titles trimmed: \(appState.outline.map(\.title))")
+        func marked(at text: String) -> [String] {
+            textView.setSelectedRange(NSRange(location: (storage.string as NSString).range(of: text).location, length: 0))
+            return appState.outline.filter { appState.currentOutlineIDs.contains($0.id) }.map(\.title)
+        }
+        check(marked(at: "текст") == ["Первый"], "under H1 only")
+        check(marked(at: "ещё") == ["Первый", "Раздел"], "under H1 + H2")
+        check(marked(at: "хвост") == ["Второй"], "next H1 resets H2")
 
         // Cmd+5: an empty line becomes an item with the caret after "- ".
         storage.setAttributedString(coordinator.render(markdown: "# Заголовок\n\n"))

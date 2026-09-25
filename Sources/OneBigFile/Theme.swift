@@ -56,8 +56,8 @@ enum OBFTheme {
     /// The sidebar card in window coordinates (origin bottom left): the
     /// layout is fixed, so hit tests can use it directly.
     static var sidebarFrame: CGRect {
-        CGRect(x: windowWidth - contentPadding - sidebarWidth, y: contentPadding,
-               width: sidebarWidth, height: windowHeight - contentPadding * 2 - paperTopGap)
+        CGRect(x: windowWidth - contentPadding - sidebarWidth, y: contentPadding + paperTopGap,
+               width: sidebarWidth, height: windowHeight - (contentPadding + paperTopGap) * 2)
     }
 
     /// Widest the text column gets; on a wider editor it is centered.

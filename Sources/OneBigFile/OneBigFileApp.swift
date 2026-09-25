@@ -20,7 +20,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             || CommandLine.arguments.contains("--uitest-typography")
             || CommandLine.arguments.contains("--uitest-themes")
             || CommandLine.arguments.contains("--uitest-sidebar")
-            || CommandLine.arguments.contains("--uitest-outline") {
+            || CommandLine.arguments.contains("--uitest-outline")
+            || CommandLine.arguments.contains("--uitest-picker")
+            || CommandLine.arguments.contains("--uitest-idle")
+            || CommandLine.arguments.contains("--uitest-tabbar") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                 NSApp.activate(ignoringOtherApps: true)
                 NSApp.windows.first?.makeKeyAndOrderFront(nil)
@@ -44,7 +47,8 @@ struct OneBigFileApp: App {
     private static func makeAppState() -> AppState {
         let args = CommandLine.arguments
         if args.contains("--uitest-typography") || args.contains("--uitest-themes") || args.contains("--uitest-sidebar")
-            || args.contains("--uitest-outline") {
+            || args.contains("--uitest-outline") || args.contains("--uitest-picker")
+            || args.contains("--uitest-idle") || args.contains("--uitest-tabbar") {
             // A throwaway copy of the real document and routine: the
             // snapshots show real content without touching it.
             let doc = URL(fileURLWithPath: "/tmp/obf_typo_document.md")
