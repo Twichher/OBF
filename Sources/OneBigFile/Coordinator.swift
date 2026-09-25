@@ -1,6 +1,6 @@
 import AppKit
 
-final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
+final class Coordinator: NSObject, NSTextViewDelegate, NSLayoutManagerDelegate, EditorCoordinating {
     private let appState: AppState
     private weak var textView: OBFTextView?
     private var pendingRefresh: DispatchWorkItem?
@@ -20,6 +20,8 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
     func attach(textView: OBFTextView) {
         self.textView = textView
         textView.delegate = self
+        // Draws list bullets in place of the "-" characters.
+        textView.layoutManager?.delegate = self
         textView.onInsertNewline = { [weak self] in
             self?.handleInsertNewline() ?? false
         }
@@ -52,6 +54,7 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
 
     @objc private func clipViewBoundsChanged(_ note: Notification) {
         syncTextViewWidth()
+        updateBreadcrumb()
     }
 
     private func syncTextViewWidth() {
@@ -78,6 +81,10 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
         let markdown = appState.store.load()
         storage.setAttributedString(render(markdown: markdown))
         isLoading = false
+        // Lists, indents and links are derived from the text itself.
+        if storage.length > 0 {
+            applyStyles(in: NSRange(location: 0, length: storage.length))
+        }
         textView.typingAttributes = styleAttributes(for: nil)
         rebuildOutline()
     }
@@ -248,6 +255,14 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
     func styleAttributes(for level: Int?, task: Int? = nil, created: String? = nil) -> [NSAttributedString.Key: Any] {
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byWordWrapping
+        // Air between lines and paragraphs; lineSpacing (added below each
+        // line) keeps the caret its normal height.
+        let size = CGFloat(appState.bodyPointSize)
+        paragraph.lineSpacing = round(size * 0.3)
+        paragraph.paragraphSpacing = round(size * 0.15)
+        // Uniform tab stops: nested lines ("\t- …") step in evenly.
+        paragraph.tabStops = []
+        paragraph.defaultTabInterval = Self.indentStep
         var attributes: [NSAttributedString.Key: Any] = [
             .foregroundColor: OBFTheme.textNS,
             .paragraphStyle: paragraph
@@ -256,9 +271,16 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
         case 1:
             attributes[.font] = appState.h1Font
             attributes[.foregroundColor] = OBFTheme.h1TextNS
+            // A heading belongs to the text below it: more room above.
+            // Modest, since documents already separate sections with
+            // blank lines.
+            paragraph.paragraphSpacingBefore = round(size * 0.5)
+            paragraph.paragraphSpacing = round(size * 0.2)
         case 2:
             attributes[.font] = appState.h2Font
             paragraph.headIndent = 24
+            paragraph.paragraphSpacingBefore = round(size * 0.4)
+            paragraph.paragraphSpacing = round(size * 0.15)
         default:
             attributes[.font] = appState.bodyFont
         }
@@ -332,6 +354,10 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
             }
             if content.length > 0 {
                 storage.setAttributes(self.styleAttributes(for: level, task: task, created: created), range: content)
+                if level == nil && task == nil {
+                    self.decorateList(content, in: storage)
+                }
+                self.decorateLinks(content, in: storage)
                 if let task {
                     // setAttributes above wipes the attachment attribute;
                     // put the checkbox image back, sized to the current font.
@@ -534,6 +560,7 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
             return lhs.range.location > rhs.range.location
         }
         appState.outline = items
+        updateBreadcrumb()
         appState.updateTasks(tasks.filter { !$0.done }.sorted(by: newestFirst)
             + tasks.filter { $0.done }.sorted(by: newestFirst))
     }
@@ -557,7 +584,9 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
         layoutManager.ensureLayout(for: container)
         let glyphIndex = layoutManager.glyphIndexForCharacter(at: location)
         let rect = layoutManager.boundingRect(forGlyphRange: NSRange(location: glyphIndex, length: 1), in: container)
-        textView.scroll(NSPoint(x: 0, y: max(0, rect.minY - 12)))
+        // The heading lands just below the pinned breadcrumb bar.
+        let bar = appState.showBreadcrumb ? Self.breadcrumbHeight : 0
+        textView.scroll(NSPoint(x: 0, y: max(0, rect.minY + textView.textContainerOrigin.y - bar - 14)))
         textView.window?.makeFirstResponder(textView)
         syncTypingAttributes()
     }
@@ -627,7 +656,70 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
             toggleTask()
         case .taskDone:
             toggleTaskDone()
+        case .list:
+            toggleList()
         }
+    }
+
+    // MARK: - Lists
+
+    /// Cmd+5: turns the selected plain lines into list items ("- " after
+    /// their leading tabs), or — when all of them already are — back into
+    /// plain lines. Headings and tasks are left alone. Goes through the
+    /// text view's editing path, so one Cmd+Z undoes it.
+    func toggleList() {
+        guard let textView, let storage = textView.textStorage else { return }
+        let ns = storage.string as NSString
+        let selection = textView.selectedRange()
+        var paragraphs: [NSRange] = []
+        if selection.length > 0, ns.length > 0 {
+            let bounded = NSIntersectionRange(selection, NSRange(location: 0, length: ns.length))
+            ns.enumerateSubstrings(in: ns.paragraphRange(for: bounded), options: .byParagraphs) { _, _, enclosing, _ in
+                paragraphs.append(enclosing)
+            }
+        } else {
+            paragraphs = [paragraphRange(at: min(selection.location, ns.length))]
+        }
+        // Plain lines only: (content, index of the "-" slot, is an item).
+        var lines: [(markerAt: Int, isItem: Bool)] = []
+        for paragraph in paragraphs {
+            let content = contentRange(of: paragraph)
+            if content.length > 0,
+               storage.attribute(.obfHeadingLevel, at: content.location, effectiveRange: nil) != nil
+                || storage.attribute(.obfTaskState, at: content.location, effectiveRange: nil) != nil {
+                continue
+            }
+            var tabs = 0
+            while tabs < content.length, ns.character(at: content.location + tabs) == 0x09 { tabs += 1 }
+            let markerAt = content.location + tabs
+            let isItem = NSMaxRange(content) - markerAt >= 2
+                && ns.character(at: markerAt) == 0x2D && ns.character(at: markerAt + 1) == 0x20
+            lines.append((markerAt, isItem))
+        }
+        guard !lines.isEmpty else { NSSound.beep(); return }
+        let removing = lines.allSatisfy(\.isItem)
+        var start = selection.location
+        var end = NSMaxRange(selection)
+        // Bottom-up, so earlier positions stay valid.
+        for line in lines.reversed() where removing || !line.isItem {
+            let range = NSRange(location: line.markerAt, length: removing ? 2 : 0)
+            let replacement = removing ? "" : "- "
+            guard textView.shouldChangeText(in: range, replacementString: replacement) else { continue }
+            storage.replaceCharacters(in: range, with: NSAttributedString(string: replacement, attributes: styleAttributes(for: nil)))
+            textView.didChangeText()
+            let delta = replacement.utf16.count - range.length
+            func shift(_ position: Int) -> Int {
+                if removing {
+                    return position <= line.markerAt ? position
+                        : max(line.markerAt, position + delta)
+                }
+                return position >= line.markerAt ? position + delta : position
+            }
+            start = shift(start)
+            end = shift(end)
+        }
+        textView.setSelectedRange(NSRange(location: start, length: max(0, end - start)))
+        syncTypingAttributes()
     }
 
     // MARK: - Tasks
@@ -795,6 +887,152 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
         }
         applyMatchHighlight()
         syncTypingAttributes()
+    }
+
+    func applyTypography() {
+        // Checkbox images are drawn in the theme's colours.
+        checkboxImageCache.removeAll()
+        if let textView {
+            // Theme colours of the text view itself. textColor recolours the
+            // whole text, so it must come before the restyle (zoom) below,
+            // which puts the heading, link and bullet colours back.
+            textView.textColor = OBFTheme.textNS
+            textView.insertionPointColor = OBFTheme.textNS
+            textView.selectedTextAttributes = [
+                .backgroundColor: OBFTheme.selectionNS,
+                .foregroundColor: OBFTheme.textNS
+            ]
+            textView.backgroundColor = OBFTheme.deskNS
+            textView.enclosingScrollView?.backgroundColor = OBFTheme.deskNS
+            textView.updateColumnInsets()
+        }
+        zoom(by: 0)
+        textView?.needsDisplay = true
+        updateBreadcrumb()
+    }
+
+    // MARK: - Lists and links
+
+    /// Indent per nesting level (one leading tab).
+    static let indentStep: CGFloat = 22
+    /// Bullets by nesting level, cycling.
+    static let bullets = ["•", "◦", "▪"]
+    private static let linkDetector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+
+    /// A plain line "\t…\t- текст" is a list item: its "-" is drawn as a
+    /// bullet and wrapped lines hang under the text. A tab-indented line
+    /// without "- " keeps its indent on wrapped lines too. The text itself
+    /// is never changed.
+    private func decorateList(_ content: NSRange, in storage: NSTextStorage) {
+        let ns = storage.string as NSString
+        var tabs = 0
+        while tabs < content.length, ns.character(at: content.location + tabs) == 0x09 {
+            tabs += 1
+        }
+        let markerAt = content.location + tabs
+        let isItem = content.length - tabs >= 2
+            && ns.character(at: markerAt) == 0x2D && ns.character(at: markerAt + 1) == 0x20
+        guard isItem || tabs > 0,
+              let base = storage.attribute(.paragraphStyle, at: content.location, effectiveRange: nil) as? NSParagraphStyle,
+              let paragraph = base.mutableCopy() as? NSMutableParagraphStyle else { return }
+        var indent = CGFloat(tabs) * Self.indentStep
+        if isItem {
+            let bullet = Self.bullets[tabs % Self.bullets.count]
+            storage.addAttributes([.obfBullet: bullet, .foregroundColor: OBFTheme.bulletNS],
+                                  range: NSRange(location: markerAt, length: 1))
+            indent += ((bullet + " ") as NSString).size(withAttributes: [.font: appState.bodyFont]).width
+            // Items of one list sit closer together than paragraphs.
+            paragraph.paragraphSpacing = round(CGFloat(appState.bodyPointSize) * 0.1)
+        }
+        paragraph.headIndent = indent
+        storage.addAttribute(.paragraphStyle, value: paragraph, range: content)
+    }
+
+    /// Detected URLs get the link colour, a quiet underline and their URL
+    /// (Cmd+click opens it, see OBFTextView).
+    private func decorateLinks(_ content: NSRange, in storage: NSTextStorage) {
+        guard let detector = Self.linkDetector else { return }
+        for match in detector.matches(in: storage.string, range: content) {
+            guard let url = match.url else { continue }
+            storage.addAttributes([
+                .foregroundColor: OBFTheme.linkNS,
+                .underlineStyle: NSUnderlineStyle.single.rawValue,
+                .underlineColor: OBFTheme.linkNS.withAlphaComponent(0.35),
+                .obfLink: url,
+            ], range: match.range)
+        }
+    }
+
+    /// Swaps the glyph of each "-" that carries a bullet attribute for the
+    /// bullet's glyph (falling back to "•" when the font lacks it).
+    func layoutManager(_ layoutManager: NSLayoutManager,
+                       shouldGenerateGlyphs glyphs: UnsafePointer<CGGlyph>,
+                       properties props: UnsafePointer<NSLayoutManager.GlyphProperty>,
+                       characterIndexes charIndexes: UnsafePointer<Int>,
+                       font aFont: NSFont,
+                       forGlyphRange glyphRange: NSRange) -> Int {
+        guard let storage = layoutManager.textStorage else { return 0 }
+        let ns = storage.string as NSString
+        var replaced: [CGGlyph]?
+        for i in 0..<glyphRange.length {
+            let index = charIndexes[i]
+            guard index < ns.length, ns.character(at: index) == 0x2D,
+                  let bullet = storage.attribute(.obfBullet, at: index, effectiveRange: nil) as? String
+            else { continue }
+            for candidate in [bullet, "•"] {
+                var chars = Array(candidate.utf16)
+                var glyph = CGGlyph(0)
+                if CTFontGetGlyphsForCharacters(aFont as CTFont, &chars, &glyph, 1), glyph != 0 {
+                    if replaced == nil {
+                        replaced = Array(UnsafeBufferPointer(start: glyphs, count: glyphRange.length))
+                    }
+                    replaced?[i] = glyph
+                    break
+                }
+            }
+        }
+        guard let replaced else { return 0 }
+        replaced.withUnsafeBufferPointer { buffer in
+            layoutManager.setGlyphs(buffer.baseAddress!, properties: props, characterIndexes: charIndexes,
+                                    font: aFont, forGlyphRange: glyphRange)
+        }
+        return glyphRange.length
+    }
+
+    // MARK: - Breadcrumb
+
+    /// Height of the pinned breadcrumb bar over the editor.
+    static let breadcrumbHeight: CGFloat = 30
+
+    /// Finds the headings scrolled past: the last H1 and (under it) the
+    /// last H2 that start above the text visible just below the bar.
+    func refreshBreadcrumb() {
+        updateBreadcrumb()
+    }
+
+    private func updateBreadcrumb() {
+        guard appState.showBreadcrumb else {
+            if appState.breadcrumb != nil { appState.breadcrumb = nil }
+            return
+        }
+        guard let textView, let layoutManager = textView.layoutManager,
+              let container = textView.textContainer, let storage = textView.textStorage,
+              let clip = textView.enclosingScrollView?.contentView else { return }
+        var crumb: Breadcrumb?
+        if storage.length > 0, clip.bounds.minY > 1 {
+            let y = clip.bounds.minY - textView.textContainerOrigin.y + Self.breadcrumbHeight
+            let glyph = layoutManager.glyphIndex(for: NSPoint(x: 0, y: max(0, y)), in: container)
+            let top = layoutManager.characterIndexForGlyph(at: glyph)
+            let above = appState.outline.filter { $0.range.location < top }
+            let h1 = above.last { $0.level == 1 }
+            let h2 = above.last { $0.level == 2 && $0.range.location > (h1?.range.location ?? -1) }
+            if h1 != nil || h2 != nil {
+                crumb = Breadcrumb(h1: h1, h2: h2)
+            }
+        }
+        if appState.breadcrumb != crumb {
+            appState.breadcrumb = crumb
+        }
     }
 
     // MARK: - Enter at end of heading
@@ -980,6 +1218,11 @@ final class Coordinator: NSObject, NSTextViewDelegate, EditorCoordinating {
     /// Test hook: the live text view, for --replay modes that drive the real
     /// app window.
     var debugTextView: OBFTextView? { textView }
+    /// Tests: restyle the whole document (loadDocument does this).
+    func debugApplyStyles() {
+        guard let storage = textView?.textStorage, storage.length > 0 else { return }
+        applyStyles(in: NSRange(location: 0, length: storage.length))
+    }
 
     // MARK: - Utilities
 

@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 
 struct OutlineItem: Identifiable, Equatable {
     let title: String
@@ -42,6 +43,12 @@ struct SidebarTaskItem: Identifiable, Equatable {
     }
 }
 
+/// Current H1 / H2 above the visible text.
+struct Breadcrumb: Equatable {
+    var h1: OutlineItem?
+    var h2: OutlineItem?
+}
+
 /// Sidebar tabs, in display order. Switchable via the arrows next to the
 /// tab title, the hover list, and two-finger swipe gestures.
 enum SidebarTab: Int, CaseIterable, Identifiable {
@@ -58,6 +65,36 @@ enum SidebarTab: Int, CaseIterable, Identifiable {
         case .photos: return "Фотографии"
         case .files: return "Файлы"
         case .control: return "Управление"
+        }
+    }
+
+    /// Letter of the tab's shortcut: Cmd+Shift+letter anywhere in the app
+    /// (Рутина also Cmd+R), the bare letter in the tab picker (Cmd+K).
+    /// Chosen from the English name: Structure, Tasks, deadLines (D is a
+    /// screenshot shortcut), Routine, Photos, Files, Control.
+    var shortcutLetter: String {
+        switch self {
+        case .structure: return "S"
+        case .tasks: return "T"
+        case .deadlines: return "L"
+        case .routine: return "R"
+        case .photos: return "P"
+        case .files: return "F"
+        case .control: return "C"
+        }
+    }
+
+    /// Physical key of `shortcutLetter`, so the shortcuts work in any
+    /// keyboard layout.
+    var shortcutKeyCode: UInt16 {
+        switch self {
+        case .structure: return 1
+        case .tasks: return 17
+        case .deadlines: return 37
+        case .routine: return 15
+        case .photos: return 35
+        case .files: return 3
+        case .control: return 8
         }
     }
 }
@@ -111,6 +148,111 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Document font (Вид → Шрифт текста).
+    @Published var editorFont: EditorFont = OBFTheme.editorFont {
+        didSet {
+            guard editorFont != oldValue else { return }
+            OBFTheme.editorFont = editorFont
+            UserDefaults.standard.set(editorFont.rawValue, forKey: "editorFont")
+            editor?.applyTypography()
+        }
+    }
+    /// Colour theme (Вид → Тема), by id.
+    @Published var themeID: String = OBFTheme.theme.id {
+        didSet {
+            guard themeID != oldValue else { return }
+            OBFTheme.theme = ColorTheme.named(themeID)
+            UserDefaults.standard.set(themeID, forKey: "theme")
+            editor?.applyTypography()
+        }
+    }
+    /// Interface in the document font instead of the system font.
+    @Published var uiFollowsEditor: Bool = OBFTheme.uiFollowsEditor {
+        didSet {
+            OBFTheme.uiFollowsEditor = uiFollowsEditor
+            UserDefaults.standard.set(uiFollowsEditor, forKey: "uiFollowsEditor")
+        }
+    }
+    /// Identity of the interface font; views that bake fonts in rebuild
+    /// when it changes.
+    var uiFontKey: String { "\(uiFollowsEditor)-\(editorFont.rawValue)-\(themeID)" }
+
+    /// Breadcrumb bar on/off (Вид → Хлебные крошки). Persisted.
+    @Published var showBreadcrumb: Bool = UserDefaults.standard.object(forKey: "showBreadcrumb") as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(showBreadcrumb, forKey: "showBreadcrumb")
+            editor?.refreshBreadcrumb()
+        }
+    }
+
+    /// Titles of the H1 headings folded in the "Структура" tab. Persisted.
+    @Published var collapsedOutline: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "collapsedOutline") ?? []) {
+        didSet { UserDefaults.standard.set(Array(collapsedOutline).sorted(), forKey: "collapsedOutline") }
+    }
+
+    /// The outline as shown: H2 rows under a folded H1 are left out.
+    var visibleOutline: [OutlineItem] {
+        var result: [OutlineItem] = []
+        var folded = false
+        for item in outline {
+            if item.level == 1 {
+                folded = collapsedOutline.contains(item.title)
+                result.append(item)
+            } else if !folded {
+                result.append(item)
+            }
+        }
+        return result
+    }
+
+    /// H1 headings that have H2 headings under them (only those fold).
+    var foldableOutlineIDs: Set<Int> {
+        var ids = Set<Int>()
+        var currentH1: OutlineItem?
+        for item in outline {
+            if item.level == 1 {
+                currentH1 = item
+            } else if let h1 = currentH1 {
+                ids.insert(h1.id)
+            }
+        }
+        return ids
+    }
+
+    func toggleOutlineFold(_ item: OutlineItem) {
+        if collapsedOutline.contains(item.title) {
+            collapsedOutline.remove(item.title)
+        } else {
+            collapsedOutline.insert(item.title)
+        }
+    }
+
+    /// Sidebar shown or hidden (Cmd+S). Persisted; hiding keeps the tab,
+    /// so it reopens where it was.
+    @Published private(set) var sidebarVisible: Bool = UserDefaults.standard.object(forKey: "sidebarVisible") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(sidebarVisible, forKey: "sidebarVisible") }
+    }
+
+    /// Cmd+S: slides the sidebar out or back in.
+    func toggleSidebar() {
+        setSidebarVisible(!sidebarVisible)
+    }
+
+    func setSidebarVisible(_ visible: Bool) {
+        guard visible != sidebarVisible else { return }
+        if !visible {
+            // A hidden card cannot hold the keys.
+            endRoutineKeyFocus()
+        }
+        // The slide itself is animated by the view (ContentView).
+        sidebarVisible = visible
+    }
+
+    /// Headings the reader has scrolled past, shown pinned over the top of
+    /// the editor ("Магистратура › Аналитические модели"); nil at the top
+    /// of the document or before the first heading.
+    @Published var breadcrumb: Breadcrumb?
+
     let store: DocumentStore
     weak var editor: EditorCoordinating?
 
@@ -138,7 +280,32 @@ final class AppState: ObservableObject {
     /// Set by Cmd+T: until this moment a digit 1…7 picks the weekday.
     var routineChordDeadline: Date?
 
-    var anyModalOpen: Bool { modalTaskID != nil || routineEditor != nil }
+    var anyModalOpen: Bool { modalTaskID != nil || routineEditor != nil || tabPickerVisible }
+
+    /// The "go to tab" picker (Cmd+K) and its highlighted row.
+    @Published private(set) var tabPickerVisible = false
+    @Published var tabPickerIndex = 0
+
+    func showTabPicker() {
+        tabPickerIndex = sidebarTab.rawValue
+        tabPickerVisible = true
+    }
+
+    func hideTabPicker() {
+        tabPickerVisible = false
+    }
+
+    /// Opens `tab`, bringing the sidebar back first if it was hidden.
+    func openSidebarTab(_ tab: SidebarTab) {
+        tabPickerVisible = false
+        setSidebarVisible(true)
+        sidebarTab = tab
+    }
+
+    func moveTabPicker(by delta: Int) {
+        let count = SidebarTab.allCases.count
+        tabPickerIndex = (tabPickerIndex + delta + count) % count
+    }
 
     init(store: DocumentStore = DocumentStore(), routineStore: RoutineStore? = nil) {
         self.store = store
@@ -277,6 +444,7 @@ final class AppState: ObservableObject {
     /// Cmd+T chord).
     func showRoutine(day: Int?) {
         routineChordDeadline = nil
+        setSidebarVisible(true)
         sidebarTab = .routine
         selectRoutineDay(day ?? routineToday)
     }
@@ -381,13 +549,15 @@ final class AppState: ObservableObject {
 
     /// Creates one task repeating on `days`, every `everyWeeks` weeks from
     /// the week `startOffset` weeks ahead.
-    func addRoutineItem(_ text: String, days: [Int], everyWeeks: Int = 1, startOffset: Int = 0) {
+    func addRoutineItem(_ text: String, days: [Int], everyWeeks: Int = 1, startOffset: Int = 0,
+                        time: RoutineTime? = nil) {
         let text = Self.cleanRoutineText(text)
         let days = Set(days.filter { (0..<7).contains($0) })
         guard !text.isEmpty, !days.isEmpty else { return }
         let task = RoutineTask(
             text: text, created: todayKey,
-            schedule: [routinePlan(days: days, everyWeeks: everyWeeks, startOffset: startOffset)])
+            schedule: [routinePlan(days: days, everyWeeks: everyWeeks, startOffset: startOffset)],
+            time: time)
         routine.tasks.append(task)
         for day in days.sorted() {
             routine.order[day].append(task.id)
@@ -395,13 +565,15 @@ final class AppState: ObservableObject {
         routineStore.save(routine)
     }
 
-    /// Items of `day` in display order: the ones still to do, then the
-    /// ones done today, then the ones in their off week — each group
-    /// keeping its stored order.
+    /// Items of `day` in display order: the ones still to do, then (on
+    /// today's list only) the ones done today, then the ones in their off
+    /// week — each group keeping its stored order. Other days ignore
+    /// today's done marks: there every card keeps its place.
     func routineItemsForDisplay(day: Int) -> [RoutineTask] {
         let tasks = routine.tasks(on: day)
         let on = tasks.filter { isRoutineItemActive($0, day: day) }
         let off = tasks.filter { !isRoutineItemActive($0, day: day) }
+        guard day == routineToday else { return on + off }
         return on.filter { !isRoutineItemDone($0) } + on.filter(isRoutineItemDone) + off
     }
 
@@ -409,11 +581,12 @@ final class AppState: ObservableObject {
     /// Days taken away drop the task from those days' lists; days added
     /// put it at the bottom of theirs.
     func updateRoutineItem(_ id: UUID, text: String, days: Set<Int>,
-                           everyWeeks: Int = 1, startOffset: Int = 0) {
+                           everyWeeks: Int = 1, startOffset: Int = 0, time: RoutineTime? = nil) {
         let text = Self.cleanRoutineText(text)
         guard !text.isEmpty, !days.isEmpty, let index = routine.taskIndex(id),
               !routine.tasks[index].isDeleted else { return }
         routine.tasks[index].text = text
+        routine.tasks[index].time = time
         routine.tasks[index].setPlan(
             routinePlan(days: days, everyWeeks: everyWeeks, startOffset: startOffset), from: todayKey)
         routine.normalizeOrder()

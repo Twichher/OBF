@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 
 /// Demo routine with made-up history, to see streaks at work. Launch with
 /// `--demo-routine`: the app then runs on throwaway files in /tmp (the real
@@ -36,15 +37,18 @@ enum RoutineDemo {
 
         var reading = task("Чтение 30 минут", created: ago(20), [(ago(20), Set(0..<7))])
         reading.done = dailyLog(reading, today: today, streak: 4) + [today]
+        reading.time = RoutineTime(end: "23:00")
         tasks.append(reading)
 
         var lecture = task("Пара в 15:55 — Аналитические модели АСОИУ", created: ago(60),
                            [(ago(60), [1, 3]), (ago(14), [1, 3, 5])])
         lecture.done = weeklyLog(lecture, today: today, streaks: [1: 3, 3: 5, 5: 1])
+        lecture.time = RoutineTime(start: "15:55", end: "17:25")
         tasks.append(lecture)
 
         var gym = task("Зал с 9 утра до 10:30", created: ago(50), [(ago(50), [0, 2, 4])])
         gym.done = weeklyLog(gym, today: today, streaks: [0: 3, 2: 2, 4: 0])
+        gym.time = RoutineTime(start: "09:00", end: "10:30")
         tasks.append(gym)
 
         var cleaning = task("Генеральная уборка", created: ago(45), [(ago(45), [6])])
@@ -70,12 +74,14 @@ enum RoutineDemo {
         biweeklyOn.schedule = [RoutineScheduleEntry(
             from: ago(70), days: [weekday], everyWeeks: 2, anchor: RoutineDate.adding(-70, to: thisWeek))]
         biweeklyOn.done = weeklyLog(biweeklyOn, today: today, streaks: [weekday: 3])
+        biweeklyOn.time = RoutineTime(start: "18:00")
         tasks.append(biweeklyOn)
 
         var biweeklyOff = task("Задача «Б» — через неделю, не на этой", created: ago(63), [])
         biweeklyOff.schedule = [RoutineScheduleEntry(
             from: ago(63), days: [weekday], everyWeeks: 2, anchor: RoutineDate.adding(-63, to: thisWeek))]
         biweeklyOff.done = weeklyLog(biweeklyOff, today: today, streaks: [weekday: 2])
+        biweeklyOff.time = RoutineTime(start: "19:15", end: "20:45")
         tasks.append(biweeklyOff)
 
         // OBF_DEMO_ONLY=<text prefix>: keep just the matching tasks (to
@@ -165,6 +171,24 @@ enum RoutineDemo {
                     .write(to: URL(fileURLWithPath: "/tmp/obf_demo_1b_edit_biweekly.png"))
             }
             appState.routineEditor = nil
+            // Time picker states rendered off-screen: valid, bad field,
+            // end before start.
+            for (name, start, end, error) in [
+                ("ok", "15:55", "17:25", nil), ("bad", "24:24", "", RoutineTimeError.start),
+                ("order", "23:00", "01:00", RoutineTimeError.order),
+            ] as [(String, String, String, RoutineTimeError?)] {
+                let host = NSHostingView(rootView: RoutineTimePicker(
+                    start: .constant(start), end: .constant(end), error: error)
+                    .frame(width: 412).padding(12).background(OBFTheme.elevated)
+                    .preferredColorScheme(.dark))
+                host.frame = NSRect(x: 0, y: 0, width: 436, height: 56)
+                host.layoutSubtreeIfNeeded()
+                if let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+                    host.cacheDisplay(in: host.bounds, to: rep)
+                    try? rep.representation(using: .png, properties: [:])?
+                        .write(to: URL(fileURLWithPath: "/tmp/obf_demo_time_\(name).png"))
+                }
+            }
         }
         after(3.0) {
             if let rise = appState.routine.tasks.first(where: { $0.text == "Подъём в 8 утра" }) {

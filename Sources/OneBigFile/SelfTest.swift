@@ -74,6 +74,12 @@ enum SelfTest {
         print("== V: routine shortcuts — Cmd+R, Cmd+T then 1…7, Delete/Cmd+Z only in routine focus ==")
         if !scenarioV() { failures += 1 }
 
+        print("== X: typography — list bullets, indents, links; markdown unchanged ==")
+        if !scenarioX() { failures += 1 }
+
+        print("== Y: sidebar hide/show keeps the tab; Cmd+R reveals it; breadcrumb switch ==")
+        if !scenarioY() { failures += 1 }
+
         print("== W: routine streaks (demo data), reorder, drag target ==")
         if !scenarioW() { failures += 1 }
 
@@ -128,7 +134,10 @@ enum SelfTest {
         // Done: logged by date, shared by all days of the task, resets next day.
         state.toggleRoutineDone(task("Зал").id)
         check(state.isRoutineItemDone(task("Зал")) && task("Зал").done == [today], "done logged")
-        check(state.routineItemsForDisplay(day: 0).map(\.text) == ["Подъём в 8 утра", "Пара", "Зал"], "done sinks")
+        // Monday's list sinks done cards only when Monday is today.
+        check(state.routineItemsForDisplay(day: 0).map(\.text)
+              == (state.routineToday == 0 ? ["Подъём в 8 утра", "Пара", "Зал"] : ["Подъём в 8 утра", "Зал", "Пара"]),
+              "done sinks on today's list only")
         check(texts(0) == ["Подъём в 8 утра", "Зал", "Пара"], "stored order kept")
         state.toggleRoutineDone(task("Зал").id)
         check(task("Зал").done.isEmpty, "undone removes date")
@@ -282,6 +291,38 @@ enum SelfTest {
         check(state.routine.tasks(on: 6).map(\.text) == ["Бег", "Растяжка"], "restored by one cmd+z")
         state.endRoutineKeyFocus()
         check(!RoutineKeys.handle(key(RoutineKeys.keyBackspace, "\u{7F}"), appState: state), "delete passes after focus left")
+
+        // Cmd+Shift+letter opens a tab from anywhere, revealing the sidebar.
+        let sidebarWas = state.sidebarVisible
+        check(RoutineKeys.handle(key(17, "t", [.command, .shift]), appState: state) && state.sidebarTab == .tasks,
+              "cmd+shift+T -> Задания")
+        state.setSidebarVisible(false)
+        check(RoutineKeys.handle(key(3, "а", [.command, .shift]), appState: state)
+              && state.sidebarTab == .files && state.sidebarVisible, "cmd+shift+F reveals Файлы (ru layout)")
+        check(!RoutineKeys.handle(key(0, "a", [.command, .shift]), appState: state), "cmd+shift+A is not ours")
+        // Cmd+K picker: arrows + Return, digits, letters, Esc; swallows the rest.
+        check(RoutineKeys.handle(key(RoutineKeys.keyK, "k", .command), appState: state) && state.tabPickerVisible,
+              "cmd+K opens the picker")
+        check(state.tabPickerIndex == SidebarTab.files.rawValue, "picker starts on the open tab")
+        _ = RoutineKeys.handle(key(RoutineKeys.keyDown, ""), appState: state)
+        _ = RoutineKeys.handle(key(RoutineKeys.keyDown, ""), appState: state)
+        check(state.tabPickerIndex == 0, "arrow wraps around")
+        check(RoutineKeys.handle(key(0, "a"), appState: state) && state.tabPickerVisible, "other keys swallowed")
+        _ = RoutineKeys.handle(key(RoutineKeys.keyUp, ""), appState: state)
+        _ = RoutineKeys.handle(key(RoutineKeys.keyReturn, "\r"), appState: state)
+        check(!state.tabPickerVisible && state.sidebarTab == .control, "Return opens the highlighted tab")
+        state.setSidebarVisible(false)
+        _ = RoutineKeys.handle(key(RoutineKeys.keyK, "k", .command), appState: state)
+        _ = RoutineKeys.handle(key(20, "3"), appState: state)
+        check(state.sidebarTab == .deadlines && state.sidebarVisible && !state.tabPickerVisible, "digit 3 -> Дедлайны")
+        _ = RoutineKeys.handle(key(RoutineKeys.keyK, "k", .command), appState: state)
+        _ = RoutineKeys.handle(key(1, "ы"), appState: state)
+        check(state.sidebarTab == .structure && !state.tabPickerVisible, "letter S -> Структура")
+        _ = RoutineKeys.handle(key(RoutineKeys.keyK, "k", .command), appState: state)
+        _ = RoutineKeys.handle(key(RoutineKeys.keyEscape, "\u{1B}"), appState: state)
+        check(!state.tabPickerVisible && state.sidebarTab == .structure, "Esc closes without change")
+        check(Set(SidebarTab.allCases.map(\.shortcutLetter)).count == SidebarTab.allCases.count, "letters unique")
+        state.setSidebarVisible(sidebarWas)
         print("    day=\(state.routineDay) ok=\(ok)")
         return ok
     }
@@ -365,6 +406,34 @@ enum SelfTest {
         check(biState.routineItemsForDisplay(day: d).map(\.text) == ["Вкл", "Обычная", "Выкл"], "off week at the bottom")
         check(!biState.isRoutineItemActive(biState.routine.tasks(on: d)[1], day: d), "off this week")
 
+        // Time of day: parsing, formatting while typing, labels, rules.
+        check(RoutineTime.format("1555") == "15:55" && RoutineTime.format("155") == "15:5"
+              && RoutineTime.format("15:") == "15" && RoutineTime.format("12a34567") == "12:34", "time typing")
+        check(RoutineTime.parse("15:55") == .time("15:55") && RoutineTime.parse("") == .empty
+              && RoutineTime.parse("24:24") == .invalid && RoutineTime.parse("12:60") == .invalid
+              && RoutineTime.parse("15:5") == .invalid && RoutineTime.parse("00:00") == .time("00:00"), "time parse")
+        func timeResult(_ a: String, _ b: String) -> String {
+            switch RoutineTime.from(start: a, end: b) {
+            case .success(let time): return time?.label ?? "none"
+            case .failure(let error): return "\(error)"
+            }
+        }
+        check(timeResult("15:55", "17:25") == "с 15:55 до 17:25", "both ends")
+        check(timeResult("09:00", "") == "с 09:00" && timeResult("", "23:00") == "до 23:00", "one end")
+        check(timeResult("", "") == "none", "no time")
+        check(timeResult("24:24", "") == "start" && timeResult("", "9") == "end", "bad field")
+        check(timeResult("23:00", "01:00") == "order" && timeResult("10:00", "10:00") == "order", "within one day")
+        let timed = makeRoutineState()
+        timed.addRoutineItem("Пара", days: [1], time: RoutineTime(start: "15:55", end: "17:25"))
+        let timedID = timed.routine.tasks[0].id
+        check(timed.routine.tasks[0].time?.label == "с 15:55 до 17:25", "time stored")
+        timed.updateRoutineItem(timedID, text: "Пара", days: [1], time: RoutineTime(end: "18:00"))
+        check(timed.routine.tasks[0].time == RoutineTime(end: "18:00")
+              && timed.routine.tasks[0].schedule.count == 1, "time edit keeps no history")
+        timed.updateRoutineItem(timedID, text: "Пара", days: [1], time: nil)
+        let untimedJSON = String(data: try! JSONEncoder().encode(timed.routine.tasks[0]), encoding: .utf8)!
+        check(timed.routine.tasks[0].time == nil && !untimedJSON.contains("time"), "time removed, file unchanged")
+
         // Reorder keeps done cards in their stored slots.
         let state = makeRoutineState()
         for text in ["A", "B", "C", "D"] { state.addRoutineItem(text, days: [state.routineToday]) }
@@ -375,6 +444,18 @@ enum SelfTest {
         check(state.routine.tasks(on: day).map(\.text) == ["D", "B", "A", "C"], "reorder around done slot")
         check(state.routineItemsForDisplay(day: day).map(\.text) == ["D", "A", "C", "B"], "display after reorder")
         check(RoutineStore(fileURL: state.routineStore.fileURL).load().order[day] == state.routine.order[day], "order saved")
+
+        // Bug repro: a task done today on another weekday's list must not
+        // sink there — dragging it to the top of that day must stick.
+        let other = (day + 1) % 7
+        for text in ["X", "Y", "Z"] { state.addRoutineItem(text, days: [day, other]) }
+        let z = state.routine.tasks.first { $0.text == "Z" }!.id
+        state.toggleRoutineDone(z)
+        check(state.routineItemsForDisplay(day: other).map(\.text) == ["X", "Y", "Z"], "no done-sinking on other days")
+        let otherIDs = state.routine.order[other]
+        state.reorderRoutineItems(day: other, activeOrder: [z] + otherIDs.filter { $0 != z })
+        check(state.routineItemsForDisplay(day: other).map(\.text) == ["Z", "X", "Y"], "moved to top sticks")
+        check(state.routineItemsForDisplay(day: day).last?.text == "Z", "still sinks on today's list")
 
         // Drag target: cards of height 40 stacked from 0 with spacing 8.
         let a = UUID(), b = UUID(), c = UUID()
@@ -778,6 +859,193 @@ enum SelfTest {
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+
+    /// --uitest-typography: renders a copy of the real document in every
+    /// document font (top of the file and scrolled, to show the breadcrumb
+    /// and lists), plus the sidebar in the system vs. document font, to
+    /// /tmp/obf_typo_*.png. Restores the persisted font settings, quits.
+    static func snapTypography(appState: AppState) {
+        let originalFont = appState.editorFont
+        let originalUI = appState.uiFollowsEditor
+        func snap(_ name: String) {
+            guard let window = NSApp.windows.first(where: { $0.isVisible }),
+                  let view = window.contentView,
+                  let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+            view.cacheDisplay(in: view.bounds, to: rep)
+            try? rep.representation(using: .png, properties: [:])?
+                .write(to: URL(fileURLWithPath: "/tmp/obf_typo_\(name).png"))
+        }
+        func scroll(to y: CGFloat) {
+            guard let textView = (appState.editor as? Coordinator)?.debugTextView else { return }
+            textView.scroll(NSPoint(x: 0, y: y))
+        }
+        var steps: [(Double, () -> Void)] = []
+        appState.uiFollowsEditor = false
+        for font in EditorFont.allCases {
+            steps.append((0.7, { appState.editorFont = font; scroll(to: 0) }))
+            steps.append((0.7, { snap("\(font.rawValue)_top"); scroll(to: 520) }))
+            steps.append((0.5, { snap("\(font.rawValue)_scrolled") }))
+        }
+        steps.append((0.3, { appState.editorFont = .newYork; appState.sidebarTab = .routine }))
+        steps.append((0.8, { snap("ui_system") ; appState.uiFollowsEditor = true }))
+        steps.append((0.8, { snap("ui_document_font") }))
+        steps.append((0.2, {
+            appState.uiFollowsEditor = originalUI
+            appState.editorFont = originalFont
+            // exit() right away would drop the pending preference writes.
+            UserDefaults.standard.synchronize()
+            print("TYPO-SNAP done")
+            exit(0)
+        }))
+        var delay = 1.0
+        for (wait, step) in steps {
+            delay += wait
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: step)
+        }
+    }
+
+    /// --uitest-themes: the real document (a copy) in every colour theme,
+    /// with the routine tab open, to /tmp/obf_theme_*.png; restores the
+    /// persisted theme, quits.
+    static func snapThemes(appState: AppState) {
+        let original = appState.themeID
+        func snap(_ name: String) {
+            guard let window = NSApp.windows.first(where: { $0.isVisible }),
+                  let view = window.contentView,
+                  let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+            view.cacheDisplay(in: view.bounds, to: rep)
+            try? rep.representation(using: .png, properties: [:])?
+                .write(to: URL(fileURLWithPath: "/tmp/obf_theme_\(name).png"))
+        }
+        var steps: [(Double, () -> Void)] = [(0, { appState.sidebarTab = .routine })]
+        for theme in ColorTheme.all {
+            steps.append((0.7, { appState.themeID = theme.id }))
+            steps.append((0.7, {
+                // A selection, to see its colour.
+                if let textView = (appState.editor as? Coordinator)?.debugTextView {
+                    textView.setSelectedRange(NSRange(location: 60, length: 40))
+                }
+                snap(theme.id)
+            }))
+        }
+        steps.append((0.2, {
+            appState.themeID = original
+            UserDefaults.standard.synchronize()
+            print("THEME-SNAP done")
+            exit(0)
+        }))
+        var delay = 1.0
+        for (wait, step) in steps {
+            delay += wait
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: step)
+        }
+    }
+
+    /// --uitest-outline: hovers a cut-short heading in "Структура" (the
+    /// real cursor is moved there and back), snaps the tooltip, then folds
+    /// the first foldable H1 and snaps again, to /tmp/obf_outline_*.png.
+    static func snapOutline(appState: AppState) {
+        let foldsWere = appState.collapsedOutline
+        let restore = CGEvent(source: nil)?.location
+        func snap(_ name: String) {
+            guard let window = NSApp.windows.first(where: { $0.isVisible }),
+                  let view = window.contentView,
+                  let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+            view.cacheDisplay(in: view.bounds, to: rep)
+            try? rep.representation(using: .png, properties: [:])?
+                .write(to: URL(fileURLWithPath: "/tmp/obf_outline_\(name).png"))
+        }
+        func hover(windowX: CGFloat, fromTop: CGFloat) {
+            guard let window = NSApp.windows.first(where: { $0.isVisible }) else { return }
+            let point = NSPoint(x: windowX, y: OBFTheme.windowHeight - fromTop)
+            let screen = window.convertToScreen(CGRect(origin: point, size: .zero)).origin
+            let mainHeight = NSScreen.screens.first?.frame.height ?? 0
+            CGWarpMouseCursorPosition(CGPoint(x: screen.x, y: mainHeight - screen.y))
+            if let moved = NSEvent.mouseEvent(with: .mouseMoved, location: point, modifierFlags: [],
+                                              timestamp: ProcessInfo.processInfo.systemUptime,
+                                              windowNumber: window.windowNumber, context: nil,
+                                              eventNumber: 0, clickCount: 0, pressure: 0) {
+                NSApp.postEvent(moved, atStart: false)
+            }
+        }
+        func after(_ t: Double, _ block: @escaping () -> Void) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + t, execute: block)
+        }
+        appState.collapsedOutline = []
+        appState.setSidebarVisible(true)
+        appState.sidebarTab = .structure
+        let x = OBFTheme.windowWidth - OBFTheme.contentPadding - OBFTheme.sidebarWidth + 90
+        after(1.2) { hover(windowX: x, fromTop: 245) }
+        after(1.4) { hover(windowX: x + 2, fromTop: 246) }
+        after(2.4) {
+            snap("1_tooltip")
+            hover(windowX: 300, fromTop: 400)
+            if let first = appState.outline.first(where: { appState.foldableOutlineIDs.contains($0.id) }) {
+                appState.toggleOutlineFold(first)
+            }
+        }
+        after(3.2) {
+            snap("2_folded")
+            appState.showTabPicker()
+            appState.moveTabPicker(by: 1)
+        }
+        after(3.8) {
+            snap("3_picker")
+            appState.hideTabPicker()
+            if let restore { CGWarpMouseCursorPosition(restore) }
+            appState.collapsedOutline = foldsWere
+            UserDefaults.standard.synchronize()
+            print("OUTLINE-SNAP done")
+            exit(0)
+        }
+    }
+
+    /// --uitest-sidebar: hides and shows the sidebar (Cmd+S), snapping the
+    /// window mid-animation and logging the text view width each frame to
+    /// /tmp/obf_sidebar_*; restores the visibility, quits.
+    static func snapSidebar(appState: AppState) {
+        let original = appState.sidebarVisible
+        func snap(_ name: String) {
+            guard let window = NSApp.windows.first(where: { $0.isVisible }),
+                  let view = window.contentView,
+                  let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+            view.cacheDisplay(in: view.bounds, to: rep)
+            try? rep.representation(using: .png, properties: [:])?
+                .write(to: URL(fileURLWithPath: "/tmp/obf_sidebar_\(name).png"))
+        }
+        var widths: [String] = []
+        let start = Date()
+        let sampler = Timer(timeInterval: 1.0 / 60, repeats: true) { _ in
+            if let textView = (appState.editor as? Coordinator)?.debugTextView {
+                let y = textView.enclosingScrollView?.contentView.bounds.minY ?? -1
+                widths.append("\(Int(Date().timeIntervalSince(start) * 1000) % 100000):\(Int(textView.frame.width))/y\(Int(y))")
+            }
+        }
+        func after(_ t: Double, _ block: @escaping () -> Void) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + t, execute: block)
+        }
+        appState.setSidebarVisible(true)
+        after(1.0) {
+            snap("1_shown")
+            RunLoop.main.add(sampler, forMode: .common)
+            appState.toggleSidebar()
+            after(0.9) {
+                snap("3_hidden")
+                print("SIDEBAR hide widths: \(widths.joined(separator: " "))")
+                widths = []
+                appState.toggleSidebar()
+                after(0.9) {
+                    sampler.invalidate()
+                    snap("5_shown_again")
+                    print("SIDEBAR show widths: \(widths.joined(separator: " "))")
+                    appState.setSidebarVisible(original)
+                    UserDefaults.standard.synchronize()
+                    print("SIDEBAR-SNAP done")
+                    exit(0)
                 }
             }
         }
@@ -1398,6 +1666,128 @@ enum SelfTest {
     /// through only while its content can still move in the event's
     /// direction; at the edges the event is eaten, so the sidebar's scroll
     /// view never starts scrolling while the pointer is inside the box.
+    private static func scenarioY() -> Bool {
+        let state = makeRoutineState()
+        var ok = true
+        func check(_ cond: Bool, _ label: String) {
+            if !cond { print("    FAIL: \(label)"); ok = false }
+        }
+        let wasVisible = state.sidebarVisible
+        state.setSidebarVisible(true)
+        state.sidebarTab = .tasks
+        state.toggleSidebar()
+        check(!state.sidebarVisible, "Cmd+S hides")
+        state.toggleSidebar()
+        check(state.sidebarVisible && state.sidebarTab == .tasks, "reopens on the same tab")
+        state.toggleSidebar()
+        state.showRoutine(day: nil)
+        check(state.sidebarVisible && state.sidebarTab == .routine, "Cmd+R reveals the sidebar")
+        // Structure folding: only H1s with H2s fold; folded H2s drop out.
+        func item(_ title: String, _ level: Int, _ at: Int) -> OutlineItem {
+            OutlineItem(title: title, level: level, range: NSRange(location: at, length: 1))
+        }
+        let foldsWere = state.collapsedOutline
+        state.collapsedOutline = []
+        state.outline = [item("A", 1, 0), item("a1", 2, 10), item("a2", 2, 20), item("B", 1, 30), item("C", 1, 40), item("c1", 2, 50)]
+        check(state.foldableOutlineIDs == [0, 40], "foldable: H1 with H2 only")
+        state.toggleOutlineFold(state.outline[0])
+        check(state.visibleOutline.map(\.title) == ["A", "B", "C", "c1"], "A folded")
+        state.toggleOutlineFold(state.outline[4])
+        check(state.visibleOutline.map(\.title) == ["A", "B", "C"], "C folded too")
+        state.toggleOutlineFold(state.outline[0])
+        check(state.visibleOutline.map(\.title) == ["A", "a1", "a2", "B", "C"], "A unfolded")
+        state.collapsedOutline = foldsWere
+        let crumbWas = state.showBreadcrumb
+        state.breadcrumb = Breadcrumb(h1: OutlineItem(title: "A", level: 1, range: NSRange(location: 0, length: 1)))
+        state.showBreadcrumb = false
+        check(UserDefaults.standard.bool(forKey: "showBreadcrumb") == false, "breadcrumb switch persisted")
+        state.showBreadcrumb = crumbWas
+        state.setSidebarVisible(wasVisible)
+        print("    ok=\(ok)")
+        return ok
+    }
+
+    private static func scenarioX() -> Bool {
+        let (_, textView, coordinator, storage) = makeStack()
+        var ok = true
+        func check(_ cond: Bool, _ label: String) {
+            if !cond { print("    FAIL: \(label)"); ok = false }
+        }
+        let markdown = """
+            # Предмет
+            - пункт первого уровня
+            \t- вложенный пункт с длинным текстом, который переносится на следующую строку и должен висеть под текстом, а не под маркером
+            \t\t- третий уровень
+            Ссылка на курс:
+            \thttps://e-learning.bmstu.ru/iu5/mod/folder/view.php?id=1343
+            -не пункт (без пробела)
+            - [ ] <!-- 2026-09-25 --> задание
+            """
+        storage.setAttributedString(coordinator.render(markdown: markdown))
+        coordinator.debugApplyStyles()
+        pump()
+        let ns = storage.string as NSString
+        func paragraph(_ prefix: String) -> NSRange {
+            var found = NSRange(location: NSNotFound, length: 0)
+            ns.enumerateSubstrings(in: NSRange(location: 0, length: ns.length), options: .byParagraphs) { sub, range, _, stop in
+                if sub?.hasPrefix(prefix) == true { found = range; stop.pointee = true }
+            }
+            return found
+        }
+        func bullet(_ prefix: String) -> String? {
+            let range = paragraph(prefix)
+            let dash = ns.range(of: "-", range: range).location
+            return dash == NSNotFound ? nil : storage.attribute(.obfBullet, at: dash, effectiveRange: nil) as? String
+        }
+        func headIndent(_ prefix: String) -> CGFloat {
+            (storage.attribute(.paragraphStyle, at: paragraph(prefix).location, effectiveRange: nil) as? NSParagraphStyle)?.headIndent ?? -1
+        }
+        check(bullet("- пункт") == "•" && bullet("\t- вложенный") == "◦" && bullet("\t\t- третий") == "▪", "bullets by level")
+        check(bullet("-не пункт") == nil, "no bullet without space")
+        check(headIndent("\t- вложенный") > Coordinator.indentStep && headIndent("\t- вложенный") < Coordinator.indentStep * 2,
+              "hanging indent under the text: \(headIndent("\t- вложенный"))")
+        check(headIndent("\thttps") == Coordinator.indentStep, "tab-indented line keeps its indent")
+        let link = ns.range(of: "https://")
+        check((storage.attribute(.obfLink, at: link.location, effectiveRange: nil) as? URL)?.host == "e-learning.bmstu.ru",
+              "link detected")
+        // The bullet is drawn as a glyph swap only: the characters stay "- ".
+        if let lm = textView.layoutManager, let tc = textView.textContainer {
+            lm.ensureLayout(for: tc)
+            let dash = ns.range(of: "-", range: paragraph("- пункт")).location
+            let glyph = lm.cgGlyph(at: lm.glyphIndexForCharacter(at: dash))
+            let font = storage.attribute(.font, at: dash, effectiveRange: nil) as! NSFont
+            var chars = Array("•".utf16)
+            var expected = CGGlyph(0)
+            CTFontGetGlyphsForCharacters(font as CTFont, &chars, &expected, 1)
+            check(glyph == expected && expected != 0, "bullet glyph drawn")
+        }
+        check(coordinator.serialize(storage: storage) == markdown, "markdown round-trip unchanged")
+
+        // Cmd+5: an empty line becomes an item with the caret after "- ".
+        storage.setAttributedString(coordinator.render(markdown: "# Заголовок\n\n"))
+        textView.setSelectedRange(NSRange(location: storage.length, length: 0))
+        coordinator.toggleList()
+        type(textView, "пункт")
+        check(coordinator.serialize(storage: storage) == "# Заголовок\n- пункт", "cmd+5 on empty line: \(coordinator.serialize(storage: storage).debugDescription)")
+        // Several lines at once, tabs kept; a heading in the selection is skipped.
+        storage.setAttributedString(coordinator.render(markdown: "# Заголовок\nодин\n\tдва\n- три"))
+        textView.setSelectedRange(NSRange(location: 0, length: storage.length))
+        coordinator.toggleList()
+        check(coordinator.serialize(storage: storage) == "# Заголовок\n- один\n\t- два\n- три", "cmd+5 adds to plain lines")
+        textView.setSelectedRange(NSRange(location: 0, length: storage.length))
+        coordinator.toggleList()
+        check(coordinator.serialize(storage: storage) == "# Заголовок\nодин\n\tдва\nтри", "cmd+5 again removes")
+        // The caret stays on its word.
+        storage.setAttributedString(coordinator.render(markdown: "слово"))
+        textView.setSelectedRange(NSRange(location: 3, length: 0))
+        coordinator.toggleList()
+        check(textView.selectedRange().location == 5, "caret shifted with the marker")
+        coordinator.toggleList()
+        check(textView.selectedRange().location == 3 && storage.string == "слово", "caret back after removal")
+        print("    ok=\(ok)")
+        return ok
+    }
+
     private static func scenarioT() -> Bool {
         let short = !TaskCardView.needsExpansion("Купить молоко")
         let two = !TaskCardView.needsExpansion("Если задание слишком короткое")

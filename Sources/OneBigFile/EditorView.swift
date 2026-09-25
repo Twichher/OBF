@@ -10,6 +10,11 @@ extension NSAttributedString.Key {
     /// as an HTML comment right after the task marker; never shown in the
     /// editor itself, only in the sidebar's task list.
     static let obfTaskCreated = NSAttributedString.Key("OBFTaskCreated")
+    /// On the "-" of a list line ("- текст"): the bullet drawn in its
+    /// place ("•", "◦", "▪" by nesting level). The document keeps "- ".
+    static let obfBullet = NSAttributedString.Key("OBFBullet")
+    /// URL of a detected link; Cmd+click opens it.
+    static let obfLink = NSAttributedString.Key("OBFLink")
 }
 
 enum OBFCommand {
@@ -17,6 +22,7 @@ enum OBFCommand {
     case heading(Int)
     case task
     case taskDone
+    case list
 }
 
 final class OBFTextView: NSTextView {
@@ -48,6 +54,7 @@ final class OBFTextView: NSTextView {
             case "0": onCommand?(.heading(0)); return true
             case "3": onCommand?(.task); return true
             case "4": onCommand?(.taskDone); return true
+            case "5": onCommand?(.list); return true
             default: break
             }
         }
@@ -57,6 +64,114 @@ final class OBFTextView: NSTextView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         needsLayout = true
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        let widthChanged = abs(newSize.width - frame.width) > 0.25
+        let clip = enclosingScrollView?.contentView
+        let scrollY = clip?.bounds.origin.y ?? 0
+        super.setFrameSize(newSize)
+        updateColumnInsets()
+        // A width change (the sidebar sliding in or out) re-insets the
+        // column, and AppKit then scrolls to "reveal" the caret — the
+        // document jumps. Keep the reader where they were instead. (Height
+        // changes come from typing and keep AppKit's caret scrolling.)
+        if widthChanged, let clip, abs(clip.bounds.origin.y - scrollY) > 0.5 {
+            let maxY = max(0, frame.height - clip.bounds.height)
+            clip.setBoundsOrigin(NSPoint(x: clip.bounds.origin.x, y: min(scrollY, maxY)))
+            enclosingScrollView?.reflectScrolledClipView(clip)
+        }
+    }
+
+    /// Centers a text column of at most OBFTheme.textColumnWidth: the
+    /// horizontal inset grows with the view, never below 20.
+    func updateColumnInsets() {
+        let horizontal = max(20, floor((frame.width - OBFTheme.textColumnWidth) / 2))
+        let inset = NSSize(width: horizontal, height: OBFTheme.textTopInset)
+        if textContainerInset != inset {
+            textContainerInset = inset
+        }
+    }
+
+    // MARK: Sheet
+
+    /// The sheet under the text column, in view coordinates: the column
+    /// plus OBFTheme.paperPadding each side, from the style's top gap down
+    /// past the bottom (the page never ends).
+    var paperRect: NSRect {
+        let x = max(8, textContainerOrigin.x + (textContainer?.lineFragmentPadding ?? 0) - OBFTheme.paperPadding)
+        let top = OBFTheme.paperTopGap
+        return NSRect(x: x, y: top, width: max(0, bounds.width - 2 * x),
+                      height: bounds.height - top + OBFTheme.paperCornerRadius + 40)
+    }
+
+    override func drawBackground(in rect: NSRect) {
+        // Desk, then the sheet: lighter, a hairline border, rounded top
+        // corners and a soft shadow.
+        let theme = OBFTheme.theme
+        theme.desk.setFill()
+        rect.fill()
+        let radius = OBFTheme.paperCornerRadius
+        let path = NSBezierPath(roundedRect: paperRect, xRadius: radius, yRadius: radius)
+        NSGraphicsContext.saveGraphicsState()
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor.black.withAlphaComponent(theme.shadow)
+        shadow.shadowBlurRadius = 18
+        shadow.shadowOffset = NSSize(width: 0, height: -4)
+        shadow.set()
+        theme.paper.setFill()
+        path.fill()
+        NSGraphicsContext.restoreGraphicsState()
+        theme.paperBorder.setStroke()
+        path.lineWidth = 1
+        path.stroke()
+    }
+
+    // MARK: Links
+
+    /// Cmd+click on a link opens it; a plain click edits text as usual.
+    override func mouseDown(with event: NSEvent) {
+        if event.modifierFlags.contains(.command), let url = link(at: event.locationInWindow) {
+            NSWorkspace.shared.open(url)
+            return
+        }
+        super.mouseDown(with: event)
+    }
+
+    /// With Cmd held over a link, the pointer becomes a hand.
+    override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+        updateLinkCursor(event)
+    }
+
+    override func flagsChanged(with event: NSEvent) {
+        super.flagsChanged(with: event)
+        updateLinkCursor(event)
+    }
+
+    private func updateLinkCursor(_ event: NSEvent) {
+        guard let window else { return }
+        let location = event.type == .flagsChanged ? window.mouseLocationOutsideOfEventStream : event.locationInWindow
+        if event.modifierFlags.contains(.command), link(at: location) != nil {
+            NSCursor.pointingHand.set()
+        } else if event.type == .flagsChanged, bounds.contains(convert(location, from: nil)) {
+            NSCursor.iBeam.set()
+        }
+    }
+
+    /// The link under a window point, if any.
+    func link(at windowPoint: NSPoint) -> URL? {
+        guard let layoutManager, let textContainer, let storage = textStorage, storage.length > 0 else { return nil }
+        let point = convert(windowPoint, from: nil)
+        let inContainer = NSPoint(x: point.x - textContainerOrigin.x, y: point.y - textContainerOrigin.y)
+        var fraction: CGFloat = 0
+        let glyph = layoutManager.glyphIndex(for: inContainer, in: textContainer,
+                                             fractionOfDistanceThroughGlyph: &fraction)
+        let rect = layoutManager.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: textContainer)
+        guard rect.contains(inContainer) else { return nil }
+        let index = layoutManager.characterIndexForGlyph(at: glyph)
+        guard index < storage.length else { return nil }
+        return storage.attribute(.obfLink, at: index, effectiveRange: nil) as? URL
     }
 
     override func layout() {
@@ -84,6 +199,7 @@ protocol EditorCoordinating: AnyObject {
     func setHeadingLevel(_ level: Int)
     func toggleTask()
     func toggleTaskDone()
+    func toggleList()
     func scrollToOutline(_ item: OutlineItem)
     func scrollToTask(_ item: SidebarTaskItem)
     func updateFindMatches()
@@ -95,6 +211,10 @@ protocol EditorCoordinating: AnyObject {
     func zoomOut()
     func clearFindHighlight()
     func clearSelection()
+    /// Re-applies fonts and text layout after a typography setting changed.
+    func applyTypography()
+    /// Recomputes (or, when switched off, clears) the breadcrumb.
+    func refreshBreadcrumb()
 }
 
 struct EditorView: NSViewRepresentable {
@@ -118,7 +238,7 @@ struct EditorView: NSViewRepresentable {
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
-        textView.textContainerInset = NSSize(width: 20, height: 16)
+        textView.textContainerInset = NSSize(width: 20, height: OBFTheme.textTopInset)
 
         textView.isRichText = false
         textView.importsGraphics = false
@@ -128,7 +248,7 @@ struct EditorView: NSViewRepresentable {
 
         textView.font = appState.bodyFont
         textView.textColor = OBFTheme.textNS
-        textView.backgroundColor = OBFTheme.bgNS
+        textView.backgroundColor = OBFTheme.deskNS
         textView.drawsBackground = true
         textView.insertionPointColor = OBFTheme.textNS
         textView.selectedTextAttributes = [
@@ -148,7 +268,7 @@ struct EditorView: NSViewRepresentable {
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = false
         scrollView.drawsBackground = true
-        scrollView.backgroundColor = OBFTheme.bgNS
+        scrollView.backgroundColor = OBFTheme.deskNS
         scrollView.borderType = .noBorder
         // Bit-blit copying of already-rendered content is the classic source
         // of ghost lines when text shifts by a line of a different height

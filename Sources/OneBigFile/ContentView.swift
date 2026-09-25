@@ -9,29 +9,51 @@ struct ContentView: View {
             VStack(spacing: 0) {
                 if appState.findVisible {
                     FindBar()
+                        .id(appState.uiFontKey)
                 }
                 EditorView(appState: appState)
+                    .overlay(alignment: .top) {
+                        if appState.showBreadcrumb {
+                            BreadcrumbBar()
+                        }
+                    }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .sheet(item: Binding(
+                get: { appState.routineEditor },
+                set: { appState.routineEditor = $0 }
+            )) { request in
+                RoutineEditorView(request: request)
+                    .environmentObject(appState)
+            }
 
-            Rectangle()
-                .fill(OBFTheme.border)
-                .frame(width: 1)
-
+            // Always in the hierarchy (it keeps its state while hidden):
+            // hiding collapses its slot to zero width, so the card slides
+            // off past the right edge while fading, and the editor widens.
             SidebarView()
+                // Fonts are baked into the sidebar's views; a new
+                // interface font rebuilds it.
+                .id(appState.uiFontKey)
                 .frame(width: OBFTheme.sidebarWidth)
                 .frame(maxHeight: .infinity)
-                .sheet(item: Binding(
-                    get: { appState.routineEditor },
-                    set: { appState.routineEditor = $0 }
-                )) { request in
-                    RoutineEditorView(request: request)
-                        .environmentObject(appState)
-                }
+                .background(SidebarCard())
+                // Top edge level with the sheet's.
+                .padding(.top, OBFTheme.paperTopGap)
+                .padding(.leading, OBFTheme.sidebarGap)
+                .opacity(appState.sidebarVisible ? 1 : 0)
+                .frame(width: appState.sidebarVisible ? OBFTheme.sidebarWidth + OBFTheme.sidebarGap : 0,
+                       alignment: .leading)
+                .allowsHitTesting(appState.sidebarVisible)
         }
+        .animation(OBFTheme.sidebarAnimation, value: appState.sidebarVisible)
         .padding(OBFTheme.contentPadding)
         .frame(width: OBFTheme.windowWidth, height: OBFTheme.windowHeight)
-        .background(OBFTheme.bg)
+        // The desk around the sheet (re-read when the sheet style changes).
+        .background(OBFTheme.desk)
+        .overlay {
+            TabPickerOverlay()
+                .id(appState.uiFontKey)
+        }
         .sheet(isPresented: Binding(
             get: { appState.modalTaskID != nil },
             set: { if !$0 { appState.modalTaskID = nil } }
@@ -50,6 +72,18 @@ struct ContentView: View {
             if CommandLine.arguments.contains("--replay-bug2") {
                 SelfTest.replayBug2(appState: appState)
             }
+            if CommandLine.arguments.contains("--uitest-outline") {
+                SelfTest.snapOutline(appState: appState)
+            }
+            if CommandLine.arguments.contains("--uitest-sidebar") {
+                SelfTest.snapSidebar(appState: appState)
+            }
+            if CommandLine.arguments.contains("--uitest-themes") {
+                SelfTest.snapThemes(appState: appState)
+            }
+            if CommandLine.arguments.contains("--uitest-typography") {
+                SelfTest.snapTypography(appState: appState)
+            }
             if CommandLine.arguments.contains("--uitest-demo") {
                 RoutineDemo.snapshot(appState: appState)
             }
@@ -60,6 +94,168 @@ struct ContentView: View {
                 SelfTest.measureOpen(appState: appState)
             }
         }
+    }
+}
+
+/// Cmd+K: the window dims and a card lists every sidebar tab. Arrows +
+/// Return, a digit 1…7 or the tab's letter open it (the sidebar slides in
+/// if it was hidden); Esc or a click outside closes.
+struct TabPickerOverlay: View {
+    @EnvironmentObject private var appState: AppState
+
+    var body: some View {
+        ZStack {
+            if appState.tabPickerVisible {
+                Color.black.opacity(OBFTheme.theme.isDark ? 0.45 : 0.25)
+                    .contentShape(Rectangle())
+                    .onTapGesture { appState.hideTabPicker() }
+                    .transition(.opacity)
+                TabPickerCard()
+                    .transition(.opacity.combined(with: .scale(scale: 0.96)))
+            }
+        }
+        .animation(.easeOut(duration: 0.18), value: appState.tabPickerVisible)
+    }
+}
+
+private struct TabPickerCard: View {
+    @EnvironmentObject private var appState: AppState
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Перейти к разделу")
+                .font(OBFTheme.ui(12))
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 10)
+                .padding(.bottom, 4)
+            ForEach(Array(SidebarTab.allCases.enumerated()), id: \.element) { index, tab in
+                row(tab, index: index)
+            }
+            Text("↑↓ и ⏎  ·  цифра 1–7  ·  буква  ·  Esc — закрыть")
+                .font(OBFTheme.ui(11))
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 10)
+                .padding(.top, 6)
+        }
+        .padding(12)
+        .frame(width: 340)
+        .background(shape.fill(OBFTheme.paper))
+        .overlay(shape.stroke(OBFTheme.paperBorder, lineWidth: 1))
+        .shadow(color: .black.opacity(OBFTheme.theme.shadow + 0.1), radius: 30, x: 0, y: 12)
+        .animation(.easeOut(duration: 0.1), value: appState.tabPickerIndex)
+    }
+
+    private func row(_ tab: SidebarTab, index: Int) -> some View {
+        let highlighted = appState.tabPickerIndex == index
+        return HStack(spacing: 10) {
+            KeyCap(text: "\(index + 1)")
+            Text(tab.title)
+                .font(OBFTheme.ui(15))
+                .foregroundColor(OBFTheme.text)
+            if tab == appState.sidebarTab {
+                Circle()
+                    .fill(OBFTheme.h1Text)
+                    .frame(width: 5, height: 5)
+                    .help("Открыт сейчас")
+            }
+            Spacer(minLength: 8)
+            KeyCap(text: tab.shortcutLetter)
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 34)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .fill(highlighted ? OBFTheme.selection.opacity(0.45) : Color.clear))
+        .contentShape(Rectangle())
+        .onHover { if $0 { appState.tabPickerIndex = index } }
+        .onTapGesture { appState.openSidebarTab(tab) }
+    }
+}
+
+/// A small keyboard key label ("1", "S").
+private struct KeyCap: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 11, weight: .medium).monospacedDigit())
+            .foregroundColor(.secondary)
+            .frame(minWidth: 20, minHeight: 20)
+            .background(RoundedRectangle(cornerRadius: 5).fill(OBFTheme.hover))
+            .overlay(RoundedRectangle(cornerRadius: 5).stroke(OBFTheme.border, lineWidth: 1))
+    }
+}
+
+/// The sidebar's surface: a card floating over the desk — rounded, a
+/// hairline edge and a soft shadow, in the sheet's colour so the cards
+/// inside stand apart from it.
+struct SidebarCard: View {
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: OBFTheme.sidebarCornerRadius, style: .continuous)
+        shape
+            .fill(OBFTheme.paper)
+            .overlay(shape.stroke(OBFTheme.paperBorder, lineWidth: 1))
+            .shadow(color: .black.opacity(OBFTheme.theme.shadow * 0.9), radius: 20, x: 0, y: 8)
+    }
+}
+
+/// Pinned over the top of the editor while scrolling: the H1 and H2 the
+/// visible text belongs to, e.g. "Магистратура 1 семестр › Аналитические
+/// модели АСОИУ". Clicking a part jumps to that heading. Fades in and out.
+struct BreadcrumbBar: View {
+    @EnvironmentObject private var appState: AppState
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            if let crumb = appState.breadcrumb {
+                HStack(spacing: 7) {
+                    if let h1 = crumb.h1 {
+                        part(h1, color: OBFTheme.h1Text)
+                    }
+                    if crumb.h1 != nil && crumb.h2 != nil {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundColor(.secondary)
+                    }
+                    if let h2 = crumb.h2 {
+                        part(h2, color: OBFTheme.text)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .font(OBFTheme.ui(12))
+                .lineLimit(1)
+                .frame(maxWidth: OBFTheme.textColumnWidth)
+                .padding(.horizontal, 25)
+                .frame(height: Coordinator.breadcrumbHeight)
+                // Exactly the sheet's width (see OBFTextView.paperRect).
+                .frame(maxWidth: OBFTheme.textColumnWidth + 2 * OBFTheme.paperPadding - 10)
+                .background(
+                    // The sheet's colour, fading out below the bar.
+                    LinearGradient(stops: [
+                        .init(color: OBFTheme.paper, location: 0),
+                        .init(color: OBFTheme.paper, location: 0.75),
+                        .init(color: OBFTheme.paper.opacity(0), location: 1),
+                    ], startPoint: .top, endPoint: .bottom)
+                    .padding(.bottom, -10))
+                .frame(maxWidth: .infinity)
+                .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.18), value: appState.breadcrumb == nil)
+        .animation(.easeInOut(duration: 0.12), value: appState.breadcrumb)
+    }
+
+    private func part(_ item: OutlineItem, color: Color) -> some View {
+        Button {
+            appState.editor?.scrollToOutline(item)
+        } label: {
+            Text(item.title.isEmpty ? "—" : item.title)
+                .foregroundColor(color.opacity(0.85))
+                .truncationMode(.tail)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Перейти к заголовку")
     }
 }
 
@@ -152,7 +348,7 @@ struct TaskCardView: View {
     private var cardContent: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(Self.displayDate(task.created))
-                .font(.custom(OBFTheme.fontName, size: 12))
+                .font(OBFTheme.ui(12))
                 .foregroundColor(.secondary)
 
             Button {
@@ -161,13 +357,13 @@ struct TaskCardView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     Text(task.h1.map { "I \($0)" } ?? (task.h2 == nil ? "Без заголовков" : " "))
                         .font(task.h1 != nil
-                              ? Font.custom(OBFTheme.fontName, size: 13).bold()
-                              : Font.custom(OBFTheme.fontName, size: 13))
+                              ? OBFTheme.uiBold(13)
+                              : OBFTheme.ui(13))
                         .foregroundColor(task.h1 != nil ? OBFTheme.text : .secondary)
                         .lineLimit(1)
                         .truncationMode(.tail)
                     Text(task.h2.map { "II \($0)" } ?? " ")
-                        .font(.custom(OBFTheme.fontName, size: 13))
+                        .font(OBFTheme.ui(13))
                         .foregroundColor(OBFTheme.text)
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -249,7 +445,7 @@ struct TaskCardView: View {
 
     private var textContent: some View {
         Text(displayedText)
-            .font(.custom(OBFTheme.fontName, size: 14))
+            .font(OBFTheme.ui(14))
             .italic(typing)
             .foregroundColor(typing || task.text.isEmpty ? .secondary : OBFTheme.text)
             .truncationMode(.tail)
@@ -281,7 +477,7 @@ struct TaskCardView: View {
     }
 
     static func textHeight(_ text: String, size: CGFloat, width: CGFloat) -> CGFloat {
-        let font = OBFTheme.font(size: size, bold: false)
+        let font = OBFTheme.uiNSFont(size: size)
         let rect = (text as NSString).boundingRect(
             with: NSSize(width: width, height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
@@ -292,7 +488,7 @@ struct TaskCardView: View {
     /// Height of one line of the app font at `size`, so cards reserve
     /// space for lines even when the value fits on fewer.
     static func lineHeight(_ size: CGFloat) -> CGFloat {
-        let font = OBFTheme.font(size: size, bold: false)
+        let font = OBFTheme.uiNSFont(size: size)
         return ceil(font.ascender - font.descender + font.leading)
     }
 
@@ -415,7 +611,7 @@ private struct TrappedTaskTextView: NSViewRepresentable {
         if textView.string != text {
             textView.string = text
         }
-        let base = OBFTheme.font(size: fontSize, bold: false)
+        let base = OBFTheme.uiNSFont(size: fontSize)
         textView.font = placeholderStyle
             ? NSFontManager.shared.convert(base, toHaveTrait: .italicFontMask)
             : base
@@ -475,7 +671,7 @@ struct TaskModalView: View {
             }
         }
         .presentationBackground(OBFTheme.elevated)
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(OBFTheme.colorScheme)
     }
 
     private func content(_ task: SidebarTaskItem) -> some View {
@@ -491,7 +687,7 @@ struct TaskModalView: View {
                     Spacer()
                     if let created = task.created {
                         Label(TaskCardView.displayDate(created), systemImage: "calendar")
-                            .font(.custom(OBFTheme.fontName, size: 13))
+                            .font(OBFTheme.ui(13))
                             .foregroundColor(.secondary)
                     }
                 }
@@ -524,7 +720,7 @@ struct TaskModalView: View {
             Image(systemName: done ? "checkmark.circle.fill" : "circle.dashed")
                 .font(.system(size: 12, weight: .semibold))
             Text(done ? "Выполнено" : "Активное задание")
-                .font(.custom(OBFTheme.fontName, size: 13).bold())
+                .font(OBFTheme.uiBold(13))
         }
         .foregroundColor(accent)
         .padding(.horizontal, 10)
@@ -538,22 +734,22 @@ struct TaskModalView: View {
     @ViewBuilder private func location(_ task: SidebarTaskItem) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Расположение")
-                .font(.custom(OBFTheme.fontName, size: 12))
+                .font(OBFTheme.ui(12))
                 .foregroundColor(.secondary)
             if task.h1 == nil && task.h2 == nil {
                 Text("Без заголовков")
-                    .font(.custom(OBFTheme.fontName, size: 15))
+                    .font(OBFTheme.ui(15))
                     .foregroundColor(.secondary)
             }
             if let h1 = task.h1 {
                 Text("I \(h1)")
-                    .font(Font.custom(OBFTheme.fontName, size: 18).bold())
+                    .font(OBFTheme.uiBold(18))
                     .foregroundColor(OBFTheme.h1Text)
                     .fixedSize(horizontal: false, vertical: true)
             }
             if let h2 = task.h2 {
                 Text("II \(h2)")
-                    .font(.custom(OBFTheme.fontName, size: 15))
+                    .font(OBFTheme.ui(15))
                     .foregroundColor(OBFTheme.text)
                     .padding(.leading, task.h1 == nil ? 0 : 14)
                     .fixedSize(horizontal: false, vertical: true)
@@ -597,7 +793,7 @@ struct ModalButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.custom(OBFTheme.fontName, size: 14))
+            .font(OBFTheme.ui(14))
             .foregroundColor(filled ? OBFTheme.bg : OBFTheme.text)
             .padding(.horizontal, 14)
             .padding(.vertical, 7)
@@ -659,35 +855,13 @@ struct SidebarView: View {
 
     private var emptyPlaceholder: some View {
         Text("Здесь пока пусто")
-            .font(.custom(OBFTheme.fontName, size: 14))
+            .font(OBFTheme.ui(14))
             .foregroundColor(.secondary)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var outlineContent: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 6) {
-                ForEach(appState.outline) { item in
-                    Button {
-                        appState.editor?.scrollToOutline(item)
-                    } label: {
-                        Text(item.title.isEmpty ? "—" : item.title)
-                            .font(item.level == 1
-                                  ? Font.custom(OBFTheme.fontName, size: 16).bold()
-                                  : Font.custom(OBFTheme.fontName, size: 14))
-                            .foregroundColor(OBFTheme.text)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                            .padding(.leading, item.level == 2 ? 20 : 0)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .animation(.easeInOut(duration: 0.18), value: appState.outline)
-            .padding(14)
-        }
+        OutlineView()
     }
 
     // MARK: - Tasks tab
@@ -747,7 +921,7 @@ struct SidebarView: View {
     /// number of cards in that section, e.g. "Активные (10)".
     private func sectionHeader(_ title: String, count: Int) -> some View {
         Text("\(title) (\(count))")
-            .font(.custom(OBFTheme.fontName, size: 13))
+            .font(OBFTheme.ui(13))
             .foregroundColor(.secondary)
             .monospacedDigit()
             .contentTransition(.numericText())
@@ -765,7 +939,7 @@ struct SidebarView: View {
             }
 
             Text(appState.sidebarTab.title)
-                .font(.custom(OBFTheme.fontName, size: 17))
+                .font(OBFTheme.ui(17))
                 .foregroundColor(OBFTheme.text)
                 // The padded, shape-extended title is the hover zone; it
                 // reaches the bar's top edge so the cursor can travel into
@@ -810,7 +984,7 @@ struct SidebarView: View {
                     hoveringList = false
                 } label: {
                     Text(tab.title)
-                        .font(.custom(OBFTheme.fontName, size: 16))
+                        .font(OBFTheme.ui(16))
                         .foregroundColor(OBFTheme.text)
                         .frame(maxWidth: .infinity)
                         .contentShape(Rectangle())
@@ -849,6 +1023,8 @@ struct SidebarView: View {
             }
             // Mouse wheels and momentum phases carry no gesture phase.
             guard event.phase != [] else { return event }
+            // A hidden sidebar takes no gestures.
+            guard appState.sidebarVisible else { return event }
             // Modals are sheet windows; their gestures never switch tabs.
             guard !appState.anyModalOpen else { return event }
             // Synthetic posted events have no associated window; for them

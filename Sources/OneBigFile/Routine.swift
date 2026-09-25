@@ -167,6 +167,55 @@ extension RoutineScheduleEntry: Codable {
     }
 }
 
+/// Time of day of a task — display only, no history is kept. Either end
+/// may be missing ("с 9:00", "до 23:00"); both lie within one day and the
+/// start comes first.
+struct RoutineTime: Codable, Equatable {
+    /// "HH:MM"
+    var start: String?
+    var end: String?
+
+    /// "с 15:55 до 17:25", "с 15:55", "до 17:25".
+    var label: String {
+        [start.map { "с \($0)" }, end.map { "до \($0)" }].compactMap { $0 }.joined(separator: " ")
+    }
+
+    /// Parses editor input: "" -> .empty, "15:55" -> .time("15:55"), anything
+    /// else (incomplete, 24:00, 12:60) -> .invalid.
+    enum Field: Equatable { case empty, time(String), invalid }
+
+    static func parse(_ text: String) -> Field {
+        let digits = text.filter(\.isNumber)
+        if digits.isEmpty { return .empty }
+        guard digits.count == 4, let hours = Int(digits.prefix(2)), let minutes = Int(digits.suffix(2)),
+              (0...23).contains(hours), (0...59).contains(minutes) else { return .invalid }
+        return .time(String(format: "%02d:%02d", hours, minutes))
+    }
+
+    /// Editor input formatting: digits only, at most four, a colon after
+    /// the hours ("1555" -> "15:55", "155" -> "15:5").
+    static func format(_ text: String) -> String {
+        let digits = String(text.filter(\.isNumber).prefix(4))
+        return digits.count > 2 ? "\(digits.prefix(2)):\(digits.dropFirst(2))" : digits
+    }
+
+    /// The time from two editor fields, nil when both are empty; fails when
+    /// a field is invalid or the end is not after the start.
+    static func from(start: String, end: String) -> Result<RoutineTime?, RoutineTimeError> {
+        let s = parse(start), e = parse(end)
+        if s == .invalid { return .failure(.start) }
+        if e == .invalid { return .failure(.end) }
+        var time = RoutineTime()
+        if case .time(let value) = s { time.start = value }
+        if case .time(let value) = e { time.end = value }
+        if let a = time.start, let b = time.end, b <= a { return .failure(.order) }
+        return .success(time.start == nil && time.end == nil ? nil : time)
+    }
+}
+
+/// Which time field is wrong.
+enum RoutineTimeError: Error { case start, end, order }
+
 /// A routine task. One task may repeat on several weekdays; its schedule
 /// history and the log of done dates are kept for statistics, and a task
 /// removed from all days stays in the file as an archive (`deleted`).
@@ -181,6 +230,8 @@ struct RoutineTask: Codable, Identifiable, Equatable {
     var schedule: [RoutineScheduleEntry]
     /// Dates ("yyyy-MM-dd") the task was marked done, ascending.
     var done: [String] = []
+    /// Time of day shown on the card; same on all of the task's days.
+    var time: RoutineTime?
 
     var isDeleted: Bool { deleted != nil }
 
@@ -449,6 +500,13 @@ enum RoutineKeys {
     static let keyR: UInt16 = 15
     static let keyT: UInt16 = 17
     static let keyZ: UInt16 = 6
+    static let keyK: UInt16 = 40
+    static let keyEscape: UInt16 = 53
+    static let keyReturn: UInt16 = 36
+    static let keyEnter: UInt16 = 76
+    static let keyUp: UInt16 = 126
+    static let keyDown: UInt16 = 125
+    static let keyQ: UInt16 = 12
     static let keyBackspace: UInt16 = 51
     static let keyForwardDelete: UInt16 = 117
     /// Digits 1…7 on the main keyboard row.
@@ -467,28 +525,53 @@ enum RoutineKeys {
             guard let appState, !appState.anyModalOpen, event.window?.attachedSheet == nil else { return event }
             // A click outside the sidebar (into the text) ends routine
             // keyboard mode: selection and undo history are dropped.
-            if event.window != nil, !sidebarFrame.contains(event.locationInWindow) {
+            if event.window != nil,
+               !(appState.sidebarVisible && sidebarFrame.contains(event.locationInWindow)) {
                 appState.endRoutineKeyFocus()
             }
             return event
         }
     }
 
-    /// The sidebar in window coordinates; the window layout is fixed (see
-    /// OBFTheme).
-    static var sidebarFrame: CGRect {
-        CGRect(
-            x: OBFTheme.windowWidth - OBFTheme.contentPadding - OBFTheme.sidebarWidth,
-            y: OBFTheme.contentPadding,
-            width: OBFTheme.sidebarWidth,
-            height: OBFTheme.windowHeight - OBFTheme.contentPadding * 2
-        )
+    static var sidebarFrame: CGRect { OBFTheme.sidebarFrame }
+
+    /// Keys while the tab picker is open: arrows move and Return opens the
+    /// highlighted tab; a digit 1…7 or a tab's letter opens it at once;
+    /// Esc (or Cmd+K again) closes. Everything else is swallowed so no key
+    /// reaches the text underneath — except Cmd+Q.
+    private static func handleTabPicker(_ event: NSEvent, flags: NSEvent.ModifierFlags, appState: AppState) -> Bool {
+        let tabs = SidebarTab.allCases
+        switch event.keyCode {
+        case keyEscape:
+            appState.hideTabPicker()
+        case keyK where flags == [.command]:
+            appState.hideTabPicker()
+        case keyQ where flags == [.command]:
+            return false
+        case keyUp:
+            appState.moveTabPicker(by: -1)
+        case keyDown:
+            appState.moveTabPicker(by: 1)
+        case keyReturn, keyEnter:
+            appState.openSidebarTab(tabs[appState.tabPickerIndex])
+        default:
+            guard flags.subtracting([.shift, .command]).isEmpty else { break }
+            if let index = dayKeyCodes.firstIndex(of: event.keyCode), index < tabs.count {
+                appState.openSidebarTab(tabs[index])
+            } else if let tab = tabs.first(where: { $0.shortcutKeyCode == event.keyCode }) {
+                appState.openSidebarTab(tab)
+            }
+        }
+        return true
     }
 
     /// Returns true when the event was consumed.
     static func handle(_ event: NSEvent, appState: AppState, now: Date = Date()) -> Bool {
-        guard !appState.anyModalOpen else { return false }
         let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        if appState.tabPickerVisible {
+            return handleTabPicker(event, flags: flags, appState: appState)
+        }
+        guard !appState.anyModalOpen else { return false }
 
         // Second half of the Cmd+T chord.
         if let deadline = appState.routineChordDeadline {
@@ -506,6 +589,17 @@ enum RoutineKeys {
         }
         if flags == [.command], event.keyCode == keyT {
             appState.routineChordDeadline = now.addingTimeInterval(chordWindow)
+            return true
+        }
+        // Cmd+K: the tab picker.
+        if flags == [.command], event.keyCode == keyK {
+            appState.showTabPicker()
+            return true
+        }
+        // Cmd+Shift+letter: straight to a tab.
+        if flags == [.command, .shift],
+           let tab = SidebarTab.allCases.first(where: { $0.shortcutKeyCode == event.keyCode }) {
+            appState.openSidebarTab(tab)
             return true
         }
 

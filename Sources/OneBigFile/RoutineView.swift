@@ -59,12 +59,12 @@ private struct RoutineDayHeader: View {
 
             VStack(spacing: 1) {
                 Text(Weekday.names[day])
-                    .font(Font.custom(OBFTheme.fontName, size: 22).bold())
-                    .foregroundColor(.white)
+                    .font(OBFTheme.uiBold(22))
+                    .foregroundColor(OBFTheme.strong)
                     .lineLimit(1)
                 // Date of that day in the current week.
                 Text(RoutineDate.short(appState.routineDate(for: day)))
-                    .font(.custom(OBFTheme.fontName, size: 12))
+                    .font(OBFTheme.ui(12))
                     .foregroundColor(.secondary)
                     .monospacedDigit()
             }
@@ -98,7 +98,7 @@ private struct RoutineDayHeader: View {
                 Text(Self.itemCount(items.count))
             }
         }
-        .font(.custom(OBFTheme.fontName, size: 12))
+        .font(OBFTheme.ui(12))
         .foregroundColor(.secondary)
         .monospacedDigit()
         .contentTransition(.numericText())
@@ -134,7 +134,7 @@ private struct NeighborDayButton: View {
             HStack(spacing: 4) {
                 if !forward { chevron("chevron.left") }
                 Text(Weekday.names[day])
-                    .font(.custom(OBFTheme.fontName, size: 12))
+                    .font(OBFTheme.ui(12))
                     .lineLimit(1)
                     .contentTransition(.opacity)
                 if forward { chevron("chevron.right") }
@@ -270,10 +270,10 @@ private struct RoutineDayList: View {
             if items.isEmpty {
                 VStack(spacing: 6) {
                     Text("На этот день ничего нет")
-                        .font(.custom(OBFTheme.fontName, size: 14))
+                        .font(OBFTheme.ui(14))
                         .foregroundColor(.secondary)
                     Text("Нажмите «+», чтобы добавить")
-                        .font(.custom(OBFTheme.fontName, size: 12))
+                        .font(OBFTheme.ui(12))
                         .foregroundColor(.secondary.opacity(0.7))
                 }
                 .allowsHitTesting(false)
@@ -372,17 +372,23 @@ private struct RoutineCardView: View {
                     StreakLine(streak: streak)
                 }
                 Text(item.text)
-                    .font(.custom(OBFTheme.fontName, size: 14))
+                    .font(OBFTheme.ui(14))
                     .foregroundColor(OBFTheme.text)
                     .fixedSize(horizontal: false, vertical: true)
                 if let caption = planCaption(streak) {
                     Text(caption)
-                        .font(.custom(OBFTheme.fontName, size: 11))
+                        .font(OBFTheme.ui(11))
                         .foregroundColor(.secondary)
+                }
+                if let time = item.time {
+                    (Text(Image(systemName: "clock")) + Text(" " + time.label))
+                        .font(OBFTheme.ui(11))
+                        .foregroundColor(.secondary)
+                        .monospacedDigit()
                 }
                 if offWeek, let next = item.nextDueDate(after: appState.routineDate(for: day)) {
                     Text("Следующий раз: \(RoutineDate.short(next))")
-                        .font(.custom(OBFTheme.fontName, size: 11))
+                        .font(OBFTheme.ui(11))
                         .foregroundColor(OBFTheme.text.opacity(0.8))
                 }
             }
@@ -466,7 +472,7 @@ private struct StreakLine: View {
             }
         }
         return line
-            .font(.custom(OBFTheme.fontName, size: 11))
+            .font(OBFTheme.ui(11))
             .monospacedDigit()
             .lineLimit(2)
             .fixedSize(horizontal: false, vertical: true)
@@ -518,7 +524,7 @@ private struct RoutineCheckButton: View {
                 .frame(maxHeight: .infinity)
                 .background(done
                             ? OBFTheme.done.opacity(hovering ? 0.2 : 0.13)
-                            : (hovering ? Color.white.opacity(0.05) : Color.clear))
+                            : (hovering ? OBFTheme.hover : Color.clear))
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -546,14 +552,22 @@ struct RoutineEditorView: View {
     /// Repetition: every N weeks, starting `startOffset` weeks from now.
     @State private var everyWeeks = 1
     @State private var startOffset = 0
+    /// Raw time fields, "HH:MM" as typed.
+    @State private var timeStart = ""
+    @State private var timeEnd = ""
     @FocusState private var focused: Bool
 
     static let width: CGFloat = 460
 
     private var isNew: Bool { request.itemID == nil }
     private var everyDay: Bool { days.count == 7 }
+    private var time: Result<RoutineTime?, RoutineTimeError> {
+        RoutineTime.from(start: timeStart, end: timeEnd)
+    }
+
     private var canSave: Bool {
-        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !days.isEmpty
+        guard case .success = time else { return false }
+        return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !days.isEmpty
     }
 
     /// Modal title: the single day, "Каждый день", or the short names of
@@ -573,11 +587,11 @@ struct RoutineEditorView: View {
             VStack(alignment: .leading, spacing: 16) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(isNew ? "Новый пункт рутины" : "Изменить пункт рутины")
-                        .font(.custom(OBFTheme.fontName, size: 12))
+                        .font(OBFTheme.ui(12))
                         .foregroundColor(.secondary)
                     Text(title)
-                        .font(Font.custom(OBFTheme.fontName, size: 22).bold())
-                        .foregroundColor(days.isEmpty ? .secondary : .white)
+                        .font(OBFTheme.uiBold(22))
+                        .foregroundColor(days.isEmpty ? .secondary : OBFTheme.strong)
                         .lineLimit(1)
                         .minimumScaleFactor(0.7)
                         .contentTransition(.opacity)
@@ -586,7 +600,7 @@ struct RoutineEditorView: View {
 
                 TextField("Например: подъём в 8 утра", text: $text, axis: .vertical)
                     .textFieldStyle(.plain)
-                    .font(.custom(OBFTheme.fontName, size: 15))
+                    .font(OBFTheme.ui(15))
                     .foregroundColor(OBFTheme.text)
                     .lineLimit(3...10)
                     .focused($focused)
@@ -599,6 +613,11 @@ struct RoutineEditorView: View {
                             .stroke(focused ? OBFTheme.selection : OBFTheme.border, lineWidth: 1))
 
                 RoutineDayPicker(days: $days)
+
+                RoutineTimePicker(start: $timeStart, end: $timeEnd, error: {
+                    if case .failure(let error) = time { return error }
+                    return nil
+                }())
 
                 RoutineRepeatPicker(everyWeeks: $everyWeeks, startOffset: $startOffset,
                                     dates: dueDatesPreview)
@@ -627,12 +646,14 @@ struct RoutineEditorView: View {
         .frame(width: Self.width)
         .background(OBFTheme.elevated)
         .presentationBackground(OBFTheme.elevated)
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(OBFTheme.colorScheme)
         .onAppear {
             if let id = request.itemID, let task = appState.routineTask(id) {
                 text = task.text
                 days = task.currentDays
                 everyWeeks = task.everyWeeks
+                timeStart = task.time?.start ?? ""
+                timeEnd = task.time?.end ?? ""
                 // The nearest week the task is on, counted from this one.
                 let thisWeek = RoutineDate.weekStart(appState.todayKey)
                 startOffset = (0..<max(1, everyWeeks)).first {
@@ -665,12 +686,96 @@ struct RoutineEditorView: View {
         guard canSave else { return }
         if let id = request.itemID {
             appState.updateRoutineItem(id, text: text, days: days,
-                                       everyWeeks: everyWeeks, startOffset: startOffset)
+                                       everyWeeks: everyWeeks, startOffset: startOffset,
+                                       time: try? time.get())
         } else {
             appState.addRoutineItem(text, days: days.sorted(),
-                                    everyWeeks: everyWeeks, startOffset: startOffset)
+                                    everyWeeks: everyWeeks, startOffset: startOffset,
+                                    time: try? time.get())
         }
         appState.routineEditor = nil
+    }
+}
+
+/// Time of the edit modal: 🕒 с [HH:MM] до [HH:MM]. Either field may stay
+/// empty; digits are formatted as they are typed ("1555" -> "15:55"). A
+/// wrong field (2424, 12:60, an end not after the start) turns red.
+struct RoutineTimePicker: View {
+    @Binding var start: String
+    @Binding var end: String
+    let error: RoutineTimeError?
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "clock")
+                .font(.system(size: 13))
+                .foregroundColor(.secondary)
+            Text("с")
+            TimeField(text: $start, wrong: error == .start)
+            Text("до")
+            TimeField(text: $end, wrong: error == .end || error == .order)
+            if !start.isEmpty || !end.isEmpty {
+                Button {
+                    start = ""
+                    end = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 13))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Убрать время")
+                .transition(.opacity)
+            }
+            Spacer(minLength: 0)
+            if error == .order {
+                Text("конец раньше начала")
+                    .font(OBFTheme.ui(12))
+                    .foregroundColor(TimeField.red)
+                    .transition(.opacity)
+            }
+        }
+        .font(OBFTheme.ui(14))
+        .foregroundColor(.secondary)
+        .padding(.horizontal, 10)
+        .animation(.easeInOut(duration: 0.15), value: error)
+        .animation(.easeInOut(duration: 0.15), value: start.isEmpty && end.isEmpty)
+    }
+}
+
+/// "HH:MM" input: keeps digits only, inserts the colon itself. It shows
+/// red while `wrong` — except for a half-typed time while still focused.
+private struct TimeField: View {
+    static let red = Color(red: 0.93, green: 0.42, blue: 0.40)
+
+    @Binding var text: String
+    let wrong: Bool
+    @FocusState private var focused: Bool
+
+    private var showsError: Bool {
+        guard wrong else { return false }
+        // Typing "15:5" is not an error yet; a complete wrong time is.
+        return !focused || text.filter(\.isNumber).count == 4
+    }
+
+    var body: some View {
+        TextField("--:--", text: $text)
+            .textFieldStyle(.plain)
+            .font(OBFTheme.ui(14))
+            .foregroundColor(showsError ? Self.red : OBFTheme.text)
+            .monospacedDigit()
+            .multilineTextAlignment(.center)
+            .frame(width: 54)
+            .padding(.vertical, 5)
+            .background(RoundedRectangle(cornerRadius: 6).fill(showsError ? Self.red.opacity(0.12) : OBFTheme.bg))
+            .overlay(RoundedRectangle(cornerRadius: 6)
+                .stroke(showsError ? Self.red : (focused ? OBFTheme.selection : OBFTheme.border), lineWidth: 1))
+            .focused($focused)
+            .onChange(of: text) {
+                let formatted = RoutineTime.format(text)
+                if formatted != text { text = formatted }
+            }
+            .animation(.easeInOut(duration: 0.15), value: showsError)
     }
 }
 
@@ -685,7 +790,7 @@ struct RoutineRepeatPicker: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Повтор")
-                .font(.custom(OBFTheme.fontName, size: 12))
+                .font(OBFTheme.ui(12))
                 .foregroundColor(.secondary)
             HStack(spacing: 6) {
                 OptionPill(title: "Каждую неделю", on: everyWeeks == 1) { everyWeeks = 1 }
@@ -697,7 +802,7 @@ struct RoutineRepeatPicker: View {
             if everyWeeks > 1 {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Начало")
-                        .font(.custom(OBFTheme.fontName, size: 12))
+                        .font(OBFTheme.ui(12))
                         .foregroundColor(.secondary)
                         .padding(.top, 4)
                     HStack(spacing: 6) {
@@ -709,7 +814,7 @@ struct RoutineRepeatPicker: View {
                     if !dates.isEmpty {
                         (Text("Даты: ").foregroundColor(.secondary)
                          + Text(dates.joined(separator: " · ") + " · …").foregroundColor(OBFTheme.h1Text))
-                            .font(.custom(OBFTheme.fontName, size: 13))
+                            .font(OBFTheme.ui(13))
                             .monospacedDigit()
                             .padding(.top, 2)
                     }
@@ -732,7 +837,7 @@ private struct OptionPill: View {
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(.custom(OBFTheme.fontName, size: 13))
+                .font(OBFTheme.ui(13))
                 .foregroundColor(on || hovering ? OBFTheme.text : .secondary)
                 .lineLimit(1)
                 .fixedSize()
@@ -776,7 +881,7 @@ private struct NumberPill: View {
                 }
             Text(suffix)
         }
-        .font(.custom(OBFTheme.fontName, size: 13))
+        .font(OBFTheme.ui(13))
         .foregroundColor(on || focused ? OBFTheme.text : .secondary)
         .monospacedDigit()
         .padding(.horizontal, 8)
@@ -797,7 +902,7 @@ private struct PillBackground: View {
 
     var body: some View {
         RoundedRectangle(cornerRadius: 7)
-            .fill(on ? OBFTheme.h1Text.opacity(0.14) : (hovering ? Color.white.opacity(0.04) : Color.clear))
+            .fill(on ? OBFTheme.h1Text.opacity(0.14) : (hovering ? OBFTheme.hover : Color.clear))
             .overlay(RoundedRectangle(cornerRadius: 7)
                 .stroke(on ? OBFTheme.h1Text.opacity(0.6) : OBFTheme.border, lineWidth: 1))
     }
@@ -868,8 +973,8 @@ private struct PickerRow: View {
                 .frame(width: 15, height: 15)
                 Text(title)
                     .font(emphasized
-                          ? Font.custom(OBFTheme.fontName, size: 15).bold()
-                          : Font.custom(OBFTheme.fontName, size: 14))
+                          ? OBFTheme.uiBold(15)
+                          : OBFTheme.ui(14))
                     .foregroundColor(on ? OBFTheme.text : (hovering ? OBFTheme.text.opacity(0.8) : .secondary))
                 Spacer(minLength: 0)
             }
@@ -877,7 +982,7 @@ private struct PickerRow: View {
             .frame(height: emphasized ? 36 : 30)
             .background(emphasized
                         ? RoundedRectangle(cornerRadius: 7)
-                            .fill(on ? OBFTheme.h1Text.opacity(0.12) : (hovering ? Color.white.opacity(0.04) : Color.clear))
+                            .fill(on ? OBFTheme.h1Text.opacity(0.12) : (hovering ? OBFTheme.hover : Color.clear))
                         : nil)
             .overlay(emphasized
                      ? RoundedRectangle(cornerRadius: 7)
@@ -906,7 +1011,7 @@ private struct DestructiveButtonStyle: ButtonStyle {
 
         var body: some View {
             configuration.label
-                .font(.custom(OBFTheme.fontName, size: 14))
+                .font(OBFTheme.ui(14))
                 .foregroundColor(DestructiveButtonStyle.red)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 7)
